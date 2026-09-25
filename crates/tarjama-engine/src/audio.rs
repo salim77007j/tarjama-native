@@ -5,7 +5,8 @@ use std::process::{Command, Stdio};
 use tarjama_core::ffmpeg_path;
 
 /// Extract mono 16 kHz f32 samples from any media file via ffmpeg.
-/// ffmpeg's stderr is captured so failures carry a readable reason.
+/// ffmpeg's stderr is drained on a separate thread (reading it inline would
+/// deadlock: blocked stderr read vs. blocked stdout write).
 pub fn extract(path: &Path, ffmpeg: &str) -> Result<Vec<f32>> {
     let ff = ffmpeg_path(ffmpeg)?;
     let mut child = Command::new(&ff)
@@ -17,11 +18,19 @@ pub fn extract(path: &Path, ffmpeg: &str) -> Result<Vec<f32>> {
         .spawn()
         .with_context(|| format!("failed to launch ffmpeg at {}", ff.display()))?;
 
+    let mut stderr_text = String::new();
+    let stderr_thread: Option<std::thread::JoinHandle<String>> = child.stderr.take().map(|mut e| {
+        std::thread::spawn(move || {
+            use std::io::Read;
+            let mut buf = String::new();
+            let _ = e.read_to_string(&mut buf);
+            buf
+        })
+    });
+
     let mut out = Vec::new();
-    let mut err_text = String::new();
     {
         let mut stdout = child.stdout.take().context("no ffmpeg stdout")?;
-        let mut stderr = child.stderr.take().context("no ffmpeg stderr")?;
         let mut buf = [0u8; 1 << 16];
         loop {
             let n = stdout.read(&mut buf)?;
@@ -29,20 +38,17 @@ pub fn extract(path: &Path, ffmpeg: &str) -> Result<Vec<f32>> {
                 break;
             }
             out.extend_from_slice(&buf[..n]);
-            // drain stderr without blocking too long
-            if err_text.len() < 4096 {
-                let mut e = [0u8; 512];
-                if let Ok(n2) = stderr.read(&mut e) {
-                    if n2 > 0 {
-                        err_text.push_str(&String::from_utf8_lossy(&e[..n2]));
-                    }
-                }
-            }
         }
     }
     let status = child.wait()?;
+    if let Some(h) = stderr_thread {
+        match h.join() {
+            Ok(s) => stderr_text = s,
+            Err(_) => {}
+        }
+    }
     if !status.success() {
-        let detail = err_text.lines().last().unwrap_or("").to_string();
+        let detail = stderr_text.lines().last().unwrap_or("").to_string();
         return Err(anyhow!(
             "ffmpeg failed (exit {:?}){}{}",
             status.code(),
