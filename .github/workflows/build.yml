@@ -126,7 +126,7 @@ jobs:
       - name: Make short test video
         run: |
           mkdir -p testout
-          ffmpeg -y -f lavfi -i color=c=blue:s=320x240:d=7 -i assets/selftest_tr.wav -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest testout/test.mp4
+          ffmpeg -y -f lavfi -i color=c=blue:s=320x240:d=7 -i crates/tarjama-engine/assets/selftest_tr.wav -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest testout/test.mp4
           ffprobe -v error -show_entries format=duration -of csv=p=0 testout/test.mp4
       - name: Full pipeline on test video (tiny, real run)
         run: |
@@ -276,7 +276,7 @@ jobs:
             FF=./ffmpeg.exe
           fi
           echo "using ffmpeg: $FF"
-          "$FF" -y -f lavfi -i color=c=blue:s=320x240:d=7 -i assets/selftest_tr.wav -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest testout/test.mp4
+          "$FF" -y -f lavfi -i color=c=blue:s=320x240:d=7 -i crates/tarjama-engine/assets/selftest_tr.wav -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest testout/test.mp4
           ls -la testout
       - name: RUN full pipeline with shipped safe engine (tiny on test video)
         shell: bash
