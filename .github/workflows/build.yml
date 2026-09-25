@@ -133,7 +133,7 @@ jobs:
           export TARJAMA_MODELS_DIR=$PWD/models
           ./target/release/tarjama-engine --cli --input testout/test.mp4 --model tiny --out testout/ep1
           echo "--- ep1.ar.srt ---"; cat testout/ep1.ar.srt
-          grep -qP '[\x{0600}-\x{06FF}]' testout/ep1.ar.srt || { echo "::error::no Arabic in output"; exit 1; }
+          perl -CSD -ne 'BEGIN{$ok=0} $ok=1 if /[\x{0600}-\x{06FF}]/; END{exit($ok?0:1)}' testout/ep1.ar.srt || { echo "::error::no Arabic in output"; exit 1; }
           test -s testout/ep1.bilingual.srt && test -s testout/ep1.ar.vtt && test -s testout/ep1.ar.txt && test -s testout/ep1.tr.txt
           echo "PIPELINE OK"
       - name: GUI autotest under Xvfb (incl. crash-fallback)
@@ -284,14 +284,14 @@ jobs:
           export TARJAMA_MODELS_DIR=$PWD/dist/tarjama/models
           ./dist/tarjama/tarjama-engine-safe.exe --cli --input testout/test.mp4 --model tiny --out testout/ep1
           echo "--- ep1.ar.srt ---"; cat testout/ep1.ar.srt
-          grep -qP '[\x{0600}-\x{06FF}]' testout/ep1.ar.srt || { echo "::error::no Arabic in output"; exit 1; }
+          perl -CSD -ne 'BEGIN{$ok=0} $ok=1 if /[\x{0600}-\x{06FF}]/; END{exit($ok?0:1)}' testout/ep1.ar.srt || { echo "::error::no Arabic in output"; exit 1; }
           echo "SHIPPED ENGINE E2E OK"
       - name: RUN full pipeline with shipped fast engine
         shell: bash
         run: |
           export TARJAMA_MODELS_DIR=$PWD/dist/tarjama/models
           ./dist/tarjama/tarjama-engine-fast.exe --cli --input testout/test.mp4 --model tiny --out testout/ep1fast
-          grep -qP '[\x{0600}-\x{06FF}]' testout/ep1fast.ar.srt || { echo "::error::no Arabic (fast engine)"; exit 1; }
+          perl -CSD -ne 'BEGIN{$ok=0} $ok=1 if /[\x{0600}-\x{06FF}]/; END{exit($ok?0:1)}' testout/ep1fast.ar.srt || { echo "::error::no Arabic (fast engine)"; exit 1; }
           echo "FAST ENGINE E2E OK"
       - name: GUI smoke test on Windows (best effort)
         id: guitest
