@@ -118,7 +118,7 @@ pub fn vulkan_probe() -> (u32, String) {
     let mut names = Vec::new();
     for d in &devices {
         let props = unsafe { instance.get_physical_device_properties(*d) };
-        let name = std::ffi::CStr::from_ptr(props.device_name.as_ptr())
+        let name = unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }
             .to_string_lossy()
             .to_string();
         names.push(name);
