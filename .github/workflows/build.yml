@@ -13,16 +13,20 @@ env:
 
 jobs:
   # ------------------------------------------------------------------
-  # 1) Windows engine builds (2 parallel variants) + hard SIMD asserts
+  # 1) Windows engine builds (3 parallel variants) + hard SIMD asserts
+  #    gpu  = whisper.cpp Vulkan backend (GPU incl. Intel/AMD iGPUs),
+  #           CPU-side ops still SSE2-capped so it runs on any x86_64 CPU
+  #    fast = AVX2 CPU build
+  #    safe = plain SSE2 CPU build (universal fallback)
   # ------------------------------------------------------------------
   engine:
     name: Engine (${{ matrix.variant }})
     runs-on: windows-latest
-    timeout-minutes: 40
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
-        variant: [safe, fast]
+        variant: [safe, fast, gpu]
         include:
           - variant: safe
             ggml_native: "OFF"
@@ -30,12 +34,21 @@ jobs:
             ggml_avx2: "OFF"
             ggml_fma: "OFF"
             ggml_f16c: "OFF"
+            cargo_extra: ""
           - variant: fast
             ggml_native: "OFF"
             ggml_avx: "ON"
             ggml_avx2: "ON"
             ggml_fma: "ON"
             ggml_f16c: "ON"
+            cargo_extra: ""
+          - variant: gpu
+            ggml_native: "OFF"
+            ggml_avx: "OFF"
+            ggml_avx2: "OFF"
+            ggml_fma: "OFF"
+            ggml_f16c: "OFF"
+            cargo_extra: "--features vulkan"
     env:
       TARJAMA_ENGINE_VARIANT: ${{ matrix.variant }}
       TARJAMA_GGML_NATIVE: ${{ matrix.ggml_native }}
@@ -49,8 +62,33 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: engine-${{ matrix.variant }}
+      - name: Install Vulkan SDK
+        if: matrix.variant == 'gpu'
+        shell: pwsh
+        run: |
+          $sdkExe = "$env:RUNNER_TEMP\vk_sdk.exe"
+          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe" -OutFile $sdkExe
+          Write-Host "SDK downloaded, installing silently..."
+          $p = Start-Process -FilePath $sdkExe -ArgumentList "/S" -Wait -PassThru
+          Write-Host "installer exit code: $($p.ExitCode)"
+          $sdk = (Get-ChildItem "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1).FullName
+          if (-not $sdk) { Write-Error "Vulkan SDK not found after install"; exit 1 }
+          "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "VULKAN_SDK=$sdk"
+          & "$sdk\Bin\glslc.exe" --version
       - name: Build engine (${{ matrix.variant }})
-        run: cargo build --release -p tarjama-engine
+        run: cargo build --release -p tarjama-engine ${{ matrix.cargo_extra }}
+      - name: Vulkan-specific verification (gpu)
+        if: matrix.variant == 'gpu'
+        shell: bash
+        run: |
+          # The exe imports vulkan-1.dll; on this GPU-less runner the loader
+          # must sit next to the exe for it to start (same layout we ship).
+          cp "$VULKAN_SDK/Bin/vulkan-1.dll" target/release/
+          ./target/release/tarjama-engine.exe --capabilities
+          n=$(grep -ci "vulkan-1.dll" target/release/tarjama-engine.exe || true)
+          echo "vulkan-1.dll import references: $n"
+          [ "$n" -ge 1 ] || { echo "::error::gpu engine does not import vulkan-1.dll - Vulkan backend missing"; exit 1; }
       - name: Assert compiled SIMD flags
         shell: bash
         run: |
@@ -69,12 +107,24 @@ jobs:
               echo "$caps" | grep -q "fma=1"   || { echo "::error::FAST build lacks FMA!";  exit 1; }
               echo "OK: fast engine has AVX2+FMA+F16C"
               ;;
+            gpu)
+              echo "$caps" | grep -q "avx2=0"  || { echo "::error::GPU build has AVX2 CPU ops - would crash no-AVX2 CPUs!"; exit 1; }
+              echo "$caps" | grep -q "avx=0"   || { echo "::error::GPU build has AVX CPU ops!"; exit 1; }
+              echo "$caps" | grep -q "vulkan=1" || { echo "::error::GPU build lacks the Vulkan backend!"; exit 1; }
+              echo "OK: gpu engine = Vulkan backend + SSE2-capped CPU (safe on any CPU, GPU when present)"
+              ;;
           esac
       - name: Upload engine artifact
         uses: actions/upload-artifact@v4
         with:
           name: engine-${{ matrix.variant }}
           path: target/release/tarjama-engine.exe
+      - name: Upload Vulkan loader DLL (gpu)
+        if: matrix.variant == 'gpu'
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulkan-loader
+          path: target/release/vulkan-1.dll
 
   # ------------------------------------------------------------------
   # 2) Windows GUI build
@@ -140,7 +190,9 @@ jobs:
         timeout-minutes: 12
         run: |
           cp target/release/tarjama-engine target/release/tarjama-engine-safe
-          # simulate a crashing fast engine: GUI must auto-fallback to safe
+          # simulate a crashing fast engine AND a crashing gpu engine:
+          # GUI must walk gpu -> fast -> safe and land on safe
+          export TARJAMA_ENGINE_GPU=/bin/false
           export TARJAMA_ENGINE_FAST=/bin/false
           export TARJAMA_MODELS_DIR=$PWD/models
           export TARJAMA_AUTOTEST=1
@@ -234,7 +286,7 @@ jobs:
       - name: Download built exes
         uses: actions/download-artifact@v4
         with:
-          pattern: "{engine-safe,engine-fast,gui-windows}"
+          pattern: "{engine-safe,engine-fast,engine-gpu,gui-windows,vulkan-loader}"
           path: artifacts
       - name: Assemble portable folder
         shell: pwsh
@@ -243,6 +295,8 @@ jobs:
           Copy-Item artifacts/gui-windows/tarjama.exe dist/tarjama/
           Copy-Item artifacts/engine-safe/tarjama-engine.exe dist/tarjama/tarjama-engine-safe.exe
           Copy-Item artifacts/engine-fast/tarjama-engine.exe dist/tarjama/tarjama-engine-fast.exe
+          Copy-Item artifacts/engine-gpu/tarjama-engine.exe dist/tarjama/tarjama-engine-gpu.exe
+          Copy-Item artifacts/vulkan-loader/vulkan-1.dll dist/tarjama/
           Copy-Item ffmpeg.exe dist/tarjama/
           Copy-Item README.txt dist/tarjama/
           Copy-Item models/ggml-tiny-q5_1.bin  dist/tarjama/models/
@@ -262,6 +316,16 @@ jobs:
           caps=$(./dist/tarjama/tarjama-engine-fast.exe --capabilities)
           echo "$caps"
           echo "$caps" | grep -q "avx2=1" || { echo "::error::fast engine lacks AVX2"; exit 1; }
+      - name: Assert GPU engine caps + startability
+        shell: bash
+        run: |
+          # The bundled vulkan-1.dll sits in dist/tarjama, so the GPU engine
+          # must start even on this GPU-less runner (0 devices expected).
+          caps=$(cd dist/tarjama && ./tarjama-engine-gpu.exe --capabilities)
+          echo "$caps"
+          echo "$caps" | grep -q "avx2=0"   || { echo "::error::gpu engine has AVX2 CPU ops"; exit 1; }
+          echo "$caps" | grep -q "vulkan=1" || { echo "::error::gpu engine lacks Vulkan backend"; exit 1; }
+          echo "OK: GPU engine starts with bundled loader (CPU fallback on this runner)"
       - name: Make short test video
         shell: bash
         run: |
@@ -293,6 +357,14 @@ jobs:
           ./dist/tarjama/tarjama-engine-fast.exe --cli --input testout/test.mp4 --model tiny --out testout/ep1fast
           perl -CSD -ne 'BEGIN{$ok=0} $ok=1 if /[\x{0600}-\x{06FF}]/; END{exit($ok?0:1)}' testout/ep1fast.ar.srt || { echo "::error::no Arabic (fast engine)"; exit 1; }
           echo "FAST ENGINE E2E OK"
+      - name: RUN full pipeline with shipped GPU engine (CPU fallback on runner)
+        shell: bash
+        run: |
+          export TARJAMA_MODELS_DIR=$PWD/dist/tarjama/models
+          ./dist/tarjama/tarjama-engine-gpu.exe --cli --input testout/test.mp4 --model tiny --out testout/ep1gpu
+          echo "--- ep1gpu.ar.srt ---"; cat testout/ep1gpu.ar.srt
+          perl -CSD -ne 'BEGIN{$ok=0} $ok=1 if /[\x{0600}-\x{06FF}]/; END{exit($ok?0:1)}' testout/ep1gpu.ar.srt || { echo "::error::no Arabic (gpu engine)"; exit 1; }
+          echo "GPU ENGINE E2E OK (no GPU on runner -> exercised the automatic CPU fallback path)"
       - name: GUI smoke test on Windows (best effort)
         id: guitest
         continue-on-error: true
@@ -328,7 +400,7 @@ jobs:
           $z = [System.IO.Compression.ZipFile]::OpenRead("$PWD/TarjamaNative-Windows-x64.zip")
           $names = $z.Entries.FullName
           $z.Dispose()
-          @("tarjama/tarjama.exe","tarjama/tarjama-engine-safe.exe","tarjama/tarjama-engine-fast.exe","tarjama/ffmpeg.exe",
+          @("tarjama/tarjama.exe","tarjama/tarjama-engine-safe.exe","tarjama/tarjama-engine-fast.exe","tarjama/tarjama-engine-gpu.exe","tarjama/vulkan-1.dll","tarjama/ffmpeg.exe",
             "tarjama/models/ggml-tiny-q5_1.bin","tarjama/models/ggml-base-q5_1.bin","tarjama/models/ggml-small-q5_1.bin",
             "tarjama/models/opus-mt/encoder_model.int8.onnx") | ForEach-Object {
             if ($names -notcontains $_) { Write-Error "missing in zip: $_"; exit 1 } else { Write-Host "ok $_" }
@@ -354,20 +426,25 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.1.${{ github.run_number }}
-          name: Tarjama Studio Native v1.1.${{ github.run_number }}
+          tag_name: v1.2.${{ github.run_number }}
+          name: Tarjama Studio Native v1.2.${{ github.run_number }}
           body: |
             Portable, fully offline Windows build (x64). Unzip and run tarjama.exe.
 
-            v1.1: fixed crash-on-translate on CPUs without AVX2/AVX512.
-            - Two engines ship in the box: tarjama-engine-fast (AVX2, auto-selected on modern CPUs)
-              and tarjama-engine-safe (plain SSE2, runs on EVERY x86_64 CPU).
-            - The engine runs as a separate process: if it ever fails, the app shows a readable
-              error and automatically retries with the safe engine instead of closing.
-            - Cancel now really stops processing. Live elapsed time + heartbeat in the status bar.
+            v1.2: GPU ACCELERATION - the app now uses your graphics card for transcription.
+            - New tarjama-engine-gpu.exe runs whisper on the GPU via Vulkan (Intel, AMD and
+              NVIDIA - integrated laptop graphics included). A 2-minute video that took minutes
+              on the safe CPU engine should now complete in a fraction of the time.
+            - The app auto-detects your GPU and picks the best engine for your machine:
+              gpu (Vulkan) -> fast (AVX2) -> safe (SSE2). If the GPU engine ever fails to
+              start or crashes, the app retries automatically with the next engine.
+            - The log pane now shows which compute backend really ran
+              ("compute backend: GPU (Vulkan) - <your GPU name>" or "CPU").
+            - Everything still works fully offline; CPU-only machines keep working exactly
+              as before. Set TARJAMA_NO_GPU=1 to force CPU for debugging.
 
             Bundled compressed models (Tiny 32 MB, Base 60 MB, Small 190 MB q5_1 + OPUS-MT tr->ar int8).
-            ffmpeg.exe included. Everything on CPU - no GPU, no internet, no downloads.
+            ffmpeg.exe + Vulkan loader included. No internet, no downloads.
           files: TarjamaNative-Windows-x64.zip
           draft: false
           prerelease: false

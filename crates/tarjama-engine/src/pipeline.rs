@@ -49,10 +49,11 @@ pub fn run_collect(job: &JobSpec) -> Result<Vec<Seg>> {
     emit_stage("transcribe");
     let raw = crate::asr::transcribe(mdir, job.model, &samples, &job.context, job.n_threads)?;
     log(&format!(
-        "ASR done in {:.1}s, {} speech segments (first: {:?})",
+        "ASR done in {:.1}s, {} speech segments (first: {:?}) | compute backend: {}",
         t_load.elapsed().as_secs_f32(),
         raw.len(),
-        raw.first().map(|s| s.text.as_str()).unwrap_or("")
+        raw.first().map(|s| s.text.as_str()).unwrap_or(""),
+        crate::gpu::backend_report()
     ));
     if raw.is_empty() {
         bail!("No speech detected in this file");

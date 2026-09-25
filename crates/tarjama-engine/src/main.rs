@@ -8,10 +8,11 @@
 //!   tarjama-engine --run job.json     full pipeline for the GUI
 //!   tarjama-engine --cli --input F    human-oriented CLI (writes subtitle files)
 //!   tarjama-engine --selftest         verify models + full pipeline on embedded sample
-//!   tarjama-engine --capabilities     print compiled SIMD flags (CI assertion)
+//!   tarjama-engine --capabilities     print compiled SIMD + Vulkan flags (CI assertion)
 
 mod asr;
 mod audio;
+mod gpu;
 mod pipeline;
 mod translate;
 
@@ -55,9 +56,18 @@ pub fn caps() -> Caps {
 
 pub fn caps_line() -> String {
     let c = caps();
+    let (vk, vk_devs, vk_names) = gpu::vulkan_info();
     format!(
-        "engine v{APP_VERSION} compiled-flags: sse3={} avx={} avx2={} fma={} f16c={} avx512={}",
-        c.sse3, c.avx, c.avx2, c.fma, c.f16c, c.avx512
+        "engine v{APP_VERSION} compiled-flags: sse3={} avx={} avx2={} fma={} f16c={} avx512={} vulkan={} vulkan-devices={} vulkan-gpus={}",
+        c.sse3,
+        c.avx,
+        c.avx2,
+        c.fma,
+        c.f16c,
+        c.avx512,
+        vk,
+        vk_devs,
+        if vk_names.is_empty() { "none".to_string() } else { vk_names }
     )
 }
 
@@ -83,6 +93,8 @@ fn main() {
 }
 
 fn real_main() -> Result<()> {
+    // Capture whisper.cpp/ggml logs (backend detection) before anything runs.
+    gpu::install_log_capture();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.is_empty() {
         bail!("usage: tarjama-engine (--run job.json | --cli ... | --selftest | --capabilities)");
@@ -166,6 +178,7 @@ fn selftest() -> Result<()> {
     let t = Instant::now();
     let segs = asr::transcribe(&mdir, Kind::Tiny, &samples, "", 0)?;
     let dt_asr = t.elapsed().as_secs_f32();
+    println!("compute backend: {}", gpu::backend_report());
     let joined: String = segs
         .iter()
         .map(|s| s.text.clone())

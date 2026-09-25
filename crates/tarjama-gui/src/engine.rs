@@ -19,9 +19,10 @@ pub fn exe_suffix() -> &'static str {
 }
 
 /// Resolve an engine executable. Env overrides (used by tests) first, then
-/// files next to the GUI exe: tarjama-engine-fast / tarjama-engine-safe.
+/// files next to the GUI exe: tarjama-engine-gpu / -fast / -safe.
 pub fn engine_path(variant: &str) -> Option<PathBuf> {
     let env_key = match variant {
+        "gpu" => "TARJAMA_ENGINE_GPU",
         "fast" => "TARJAMA_ENGINE_FAST",
         _ => "TARJAMA_ENGINE_SAFE",
     };
@@ -42,9 +43,64 @@ pub fn engine_path(variant: &str) -> Option<PathBuf> {
     None
 }
 
-/// Pick the engine variant for this CPU. The fast engine is compiled with
-/// AVX2+FMA+F16C; the safe engine is plain SSE2 and runs on every x86_64 CPU.
+/// Downgrade chain used whenever a variant fails to start or crashes.
+pub fn next_variant(variant: &str) -> Option<&'static str> {
+    match variant {
+        "gpu" => Some("fast"),
+        "fast" => Some("safe"),
+        _ => None,
+    }
+}
+
+/// Probe the GPU engine's --capabilities output. Returns (vulkan_devices,
+/// gpu_names). Cached for the lifetime of the GUI process. The probe is
+/// time-boxed: a missing Vulkan loader, a hung driver or a broken binary all
+/// simply yield None so CPU engines stay available.
+fn probe_gpu_caps() -> Option<(u32, String)> {
+    static CACHE: std::sync::OnceLock<Option<(u32, String)>> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let path = engine_path("gpu")?;
+            let mut child = Command::new(&path)
+                .arg("--capabilities")
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok()?; // missing vulkan-1.dll etc. -> spawn error -> no GPU
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let out = child.wait_with_output();
+                let _ = tx.send(out.ok().map(|o| o.stdout));
+            });
+            let stdout = match rx.recv_timeout(std::time::Duration::from_secs(4)) {
+                Ok(Some(s)) => s,
+                _ => return None, // timeout or wait error
+            };
+            let s = String::from_utf8_lossy(&stdout).to_string();
+            let devs = s
+                .split_whitespace()
+                .find_map(|t| t.strip_prefix("vulkan-devices="))
+                .and_then(|v| v.parse::<u32>().ok())?;
+            let names = s
+                .split_whitespace()
+                .find(|t| t.starts_with("vulkan-gpus="))
+                .map(|t| t.trim_start_matches("vulkan-gpus=").to_string())
+                .unwrap_or_default();
+            Some((devs, names))
+        })
+        .clone()
+}
+
+/// Pick the engine variant for this machine, best first:
+///   1. gpu  - whisper.cpp on the GPU via Vulkan (any vendor, incl. iGPUs)
+///   2. fast - AVX2+FMA+F16C CPU build
+///   3. safe - plain SSE2, runs on every x86_64 CPU
 pub fn preferred_variant() -> &'static str {
+    if let Some((devs, _)) = probe_gpu_caps() {
+        if devs >= 1 {
+            return "gpu";
+        }
+    }
     if cfg!(target_arch = "x86_64")
         && std::arch::is_x86_feature_detected!("avx2")
         && std::arch::is_x86_feature_detected!("fma")
@@ -174,9 +230,12 @@ pub fn kill(child: &SharedChild) {
     }
 }
 
-/// Forward --selftest / --cli to the safe engine; returns its exit code.
+/// Forward --selftest / --cli to the best available engine; returns its exit code.
 pub fn forward_to_engine(args: &[String]) -> i32 {
-    let Some(path) = engine_path("safe").or_else(|| engine_path("fast")) else {
+    let Some(path) = engine_path("safe")
+        .or_else(|| engine_path("fast"))
+        .or_else(|| engine_path("gpu"))
+    else {
         eprintln!(
             "tarjama engine not found next to the app (tarjama-engine-safe{})",
             exe_suffix()

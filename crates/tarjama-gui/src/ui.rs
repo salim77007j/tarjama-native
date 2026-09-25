@@ -322,7 +322,21 @@ impl App {
                                 continue;
                             }
                             // Native crash (no terminal event, non-zero exit).
-                            if variant == "fast" && !self.retried_safe {
+                            if variant == "gpu" && !self.retried_safe {
+                                self.log_line(format!(
+                                    "The GPU engine ({variant}) crashed (exit {:?}) - switching to the CPU engine and retrying automatically...",
+                                    code
+                                ));
+                                self.set_stage("Restarting with CPU engine...".into(), false);
+                                if let Some(f) = self.file.clone() {
+                                    if engine::engine_path("fast").is_some() {
+                                        self.launch("fast", f, Some(0.5));
+                                    } else {
+                                        self.retried_safe = true;
+                                        self.launch("safe", f, Some(0.5));
+                                    }
+                                }
+                            } else if variant == "fast" && !self.retried_safe {
                                 self.retried_safe = true;
                                 self.log_line(format!(
                                     "The fast engine ({variant}) crashed (exit {:?}) - switching to the maximum-compatibility engine and retrying automatically...",
@@ -455,25 +469,35 @@ impl App {
                 self.child = Some(spawned.child);
             }
             Err(e) => {
-                // preferred engine missing? try the other one before failing
-                let other = if variant == "fast" { "safe" } else { "fast" };
-                if engine::engine_path(variant).is_none() && engine::engine_path(other).is_some() {
-                    self.log_line(format!(
-                        "{variant} engine not found - falling back to {other} engine"
-                    ));
-                    if other == "safe" {
-                        self.retried_safe = true;
-                    }
-                    self.child_variant = Some(other.to_string());
-                    match engine::spawn_engine(&job, other, &self.queue) {
-                        Ok(spawned) => {
-                            self.child = Some(spawned.child);
-                            return;
+                // The GPU engine may fail to spawn entirely (e.g. no Vulkan
+                // loader on the system) - walk down the chain gpu -> fast -> safe.
+                let can_fallback = engine::engine_path(variant).is_none() || variant == "gpu";
+                if can_fallback {
+                    for other in [engine::next_variant(variant), Some("safe")] {
+                        let Some(other) = other else { continue };
+                        if other == variant || engine::engine_path(other).is_none() {
+                            continue;
                         }
-                        Err(e2) => {
-                            self.running = false;
-                            self.err = Some(format!("{e2:#}"));
-                            return;
+                        self.log_line(format!(
+                            "{variant} engine not usable - falling back to {other} engine"
+                        ));
+                        if other == "safe" {
+                            self.retried_safe = true;
+                        }
+                        self.child_variant = Some(other.to_string());
+                        match engine::spawn_engine(&job, other, &self.queue) {
+                            Ok(spawned) => {
+                                self.child = Some(spawned.child);
+                                return;
+                            }
+                            Err(e2) => {
+                                if other == "safe" {
+                                    self.running = false;
+                                    self.err = Some(format!("{e2:#}"));
+                                    self.set_stage("Failed".into(), false);
+                                    return;
+                                }
+                            }
                         }
                     }
                 }

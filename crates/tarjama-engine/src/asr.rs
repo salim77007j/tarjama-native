@@ -18,7 +18,12 @@ pub fn transcribe(
     n_threads_override: i32,
 ) -> Result<Vec<RawSeg>> {
     let model_path = models_dir.join(kind.file());
-    let params_ctx = whisper_rs::WhisperContextParameters::default();
+    // GPU engine build (vulkan feature): try the GPU first. whisper.cpp itself
+    // falls back to CPU when no Vulkan device/init succeeds. TARJAMA_NO_GPU=1
+    // forces CPU for debugging. CPU-only builds never request the GPU.
+    let mut params_ctx = whisper_rs::WhisperContextParameters::default();
+    params_ctx.use_gpu = cfg!(feature = "vulkan")
+        && std::env::var("TARJAMA_NO_GPU").map(|v| v != "1").unwrap_or(true);
 
     let mp = model_path
         .to_str()
