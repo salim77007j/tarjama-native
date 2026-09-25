@@ -1,0 +1,8 @@
+target/
+models/*.bin
+models/.dl_status
+models/dl.log
+scripts/_marian_tmp/
+nohup.out
+*.log
+testmedia/

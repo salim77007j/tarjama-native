@@ -1,0 +1,120 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux build + selftest
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - name: Download whisper models
+        run: |
+          mkdir -p models
+          curl -sL --retry 5 -o models/ggml-tiny-q5_1.bin  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
+          curl -sL --retry 5 -o models/ggml-base-q5_1.bin  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
+          curl -sL --retry 5 -o models/ggml-small-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
+          ls -la models
+      - name: Selftest (native Linux binary)
+        run: ./target/release/tarjama --selftest
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tarjama-linux-x64
+          path: target/release/tarjama
+
+  windows:
+    name: Windows build + package + selftest
+    runs-on: windows-latest
+    env:
+      WHISPER_NO_NATIVE: "1"
+      WHISPER_NO_AVX: "1"
+      WHISPER_NO_AVX2: "1"
+      WHISPER_NO_FMA: "1"
+      WHISPER_NO_F16C: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build
+        run: cargo build --release
+      - name: Download whisper models
+        shell: bash
+        run: |
+          mkdir -p models
+          curl -sL --retry 5 -o models/ggml-tiny-q5_1.bin  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
+          curl -sL --retry 5 -o models/ggml-base-q5_1.bin  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
+          curl -sL --retry 5 -o models/ggml-small-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
+          ls -la models
+      - name: Download ffmpeg (bundled)
+        shell: bash
+        run: |
+          curl -sL --retry 5 -o ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip
+          unzip -o -q ffmpeg.zip -d ffmpeg_dist
+          find ffmpeg_dist -name ffmpeg.exe -exec cp {} ./ffmpeg.exe \;
+          ./ffmpeg.exe -version | head -2
+      - name: Selftest (Windows exe, models + MT pipeline)
+        shell: bash
+        run: ./target/release/tarjama.exe --selftest
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist/tarjama/models | Out-Null
+          Copy-Item target/release/tarjama.exe dist/tarjama/
+          Copy-Item ffmpeg.exe dist/tarjama/
+          Copy-Item README.txt dist/tarjama/
+          Copy-Item models/ggml-tiny-q5_1.bin  dist/tarjama/models/
+          Copy-Item models/ggml-base-q5_1.bin  dist/tarjama/models/
+          Copy-Item models/ggml-small-q5_1.bin dist/tarjama/models/
+          Copy-Item models/opus-mt -Destination dist/tarjama/models -Recurse
+          Compress-Archive -Path dist/tarjama -DestinationPath TarjamaNative-Windows-x64.zip
+          Get-Item TarjamaNative-Windows-x64.zip | Select-Object Name,Length
+      - name: Verify zip contents
+        shell: pwsh
+        run: |
+          Add-Type -AssemblyName System.IO.Compression.FileSystem
+          $z = [System.IO.Compression.ZipFile]::OpenRead("$PWD/TarjamaNative-Windows-x64.zip")
+          $names = $z.Entries.FullName
+          $z.Dispose()
+          @("tarjama/tarjama.exe","tarjama/ffmpeg.exe","tarjama/models/ggml-small-q5_1.bin","tarjama/models/opus-mt/encoder_model.int8.onnx") | ForEach-Object {
+            if ($names -notcontains $_) { Write-Error "missing in zip: $_"; exit 1 } else { Write-Host "ok $_" }
+          }
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TarjamaNative-Windows-x64
+          path: TarjamaNative-Windows-x64.zip
+
+  release:
+    name: Publish release
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: TarjamaNative-Windows-x64
+          path: .
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.0.${{ github.run_number }}
+          name: Tarjama Studio Native v1.0.${{ github.run_number }}
+          body: |
+            Portable, fully offline Windows build (x64). No installer needed - unzip and run tarjama.exe.
+
+            Bundled models (quantized, compressed):
+            - Whisper Tiny q5_1 (32 MB), Base q5_1 (60 MB), Small q5_1 (190 MB) - Turkish recognition
+            - OPUS-MT tr->ar int8 ONNX (encoder + decoder) - Arabic translation
+
+            Includes ffmpeg.exe (GPL build) for reading every video/audio format.
+            Everything runs on CPU - no GPU, no internet required.
+          files: TarjamaNative-Windows-x64.zip
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
