@@ -252,9 +252,10 @@ impl Pair {
             bail!("translation produced no tokens");
         }
 
-        let mut finished: Vec<(f32, usize, Vec<i64>)> = Vec::new(); // (score, len, ids)
+        let mut finished: Vec<(f32, usize, Vec<i64>)> = Vec::new(); // (raw score, len, ids)
         let mut kv_len: usize = 1; // self-cache sequence length
         let mut self_batch: usize = 1; // self_data batch (1 after step 1)
+        let mut steps_since_finish: usize = 0;
 
         for _step in 1..self.max_len {
             let b = beams.len();
@@ -314,8 +315,13 @@ impl Pair {
             }
             drop(outs);
 
-            // ---- candidates: top BEAM_SIZE per beam ----
-            let mut cands: Vec<(f32, usize, i64)> = Vec::with_capacity(b * BEAM_SIZE);
+            // ---- candidates: rank by GNMT length-penalized score ----
+            // (CTranslate2 semantics: ranking actives by score/((5+len)/6)^alpha
+            // lets longer sentences compete with short ones - raw-sum ranking
+            // makes any early-EOS short output win, truncating subtitles)
+            let plen = |l: usize| ((5.0 + l.max(1) as f32) / 6.0).powf(LENGTH_PENALTY);
+            // (penalized, raw, parent, token)
+            let mut cands: Vec<(f32, f32, usize, i64)> = Vec::with_capacity(b * BEAM_SIZE);
             for bi in 0..b {
                 let row = &logits[bi * vocab..(bi + 1) * vocab];
                 let lp = log_softmax_row(row);
@@ -329,7 +335,9 @@ impl Pair {
                     if tok == self.eos_id && beams[bi].ids.is_empty() {
                         continue; // min length 1
                     }
-                    cands.push((beams[bi].score + p, bi, tok));
+                    let raw = beams[bi].score + p;
+                    let cand_len = beams[bi].ids.len() + 1;
+                    cands.push((raw / plen(cand_len), raw, bi, tok));
                     taken += 1;
                     if taken >= BEAM_SIZE {
                         break;
@@ -340,12 +348,14 @@ impl Pair {
                 b2.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
             });
 
-            // ---- prune ----
+            // ---- prune (finished = EOS-completed hypotheses, raw score) ----
+            let fin_before = finished.len();
             let mut next: Vec<Beam> = Vec::with_capacity(BEAM_SIZE);
             let mut new_parents: Vec<usize> = Vec::with_capacity(BEAM_SIZE);
-            for (score, bi, tok) in cands.into_iter() {
+            for (_pen, raw, bi, tok) in cands.into_iter() {
                 if tok == self.eos_id {
-                    finished.push((score, beams[bi].ids.len(), beams[bi].ids.clone()));
+                    let l = beams[bi].ids.len();
+                    finished.push((raw, l, beams[bi].ids.clone()));
                     continue;
                 }
                 if next.len() >= BEAM_SIZE {
@@ -353,12 +363,24 @@ impl Pair {
                 }
                 let mut ids = beams[bi].ids.clone();
                 ids.push(tok);
-                next.push(Beam { ids, score });
+                next.push(Beam { ids, score: raw });
                 new_parents.push(bi);
             }
-            if next.is_empty() || finished.len() >= BEAM_SIZE {
+            if next.is_empty() {
                 beams = next;
                 break;
+            }
+            // patience: once we hold a full set of finished hypotheses, stop
+            // after a quiet window with no new finisher (generous: longer,
+            // better sentences keep finishing well past the first short ones)
+            if finished.len() > fin_before {
+                steps_since_finish = 0;
+            } else {
+                steps_since_finish += 1;
+                if steps_since_finish >= 2 * BEAM_SIZE && finished.len() >= BEAM_SIZE {
+                    beams = next;
+                    break;
+                }
             }
             beams = next;
 
@@ -382,19 +404,24 @@ impl Pair {
             }
         }
 
-        // ---- pick the best hypothesis (length-penalized score) ----
+        // ---- pick the best EOS-completed hypothesis. Comparing finished
+        // (EOS natural stop) against truncated active beams produces cut-off
+        // subtitles, so active beams are used ONLY if nothing finished. ----
         let penal = |score: f32, len: usize| -> f32 {
-            let l = (len.max(1) as f32).powf(LENGTH_PENALTY);
-            score / l
+            score / ((5.0 + len.max(1) as f32) / 6.0).powf(LENGTH_PENALTY)
         };
         let best_finished = finished
             .iter()
             .map(|(s, l, ids)| (penal(*s, *l), ids))
             .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
-        let best_active = beams
-            .iter()
-            .map(|bm| (penal(bm.score, bm.ids.len()), &bm.ids))
-            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+        let best_active = if finished.is_empty() {
+            beams
+                .iter()
+                .map(|bm| (penal(bm.score, bm.ids.len()), &bm.ids))
+                .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
+        } else {
+            None
+        };
         let best = match (best_finished, best_active) {
             (Some(f), Some(a)) => if f.0 >= a.0 { f.1.clone() } else { a.1.clone() },
             (Some(f), None) => f.1.clone(),
