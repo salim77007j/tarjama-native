@@ -8,45 +8,211 @@ on:
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  linux:
-    name: Linux build + selftest
-    runs-on: ubuntu-latest
+  # ------------------------------------------------------------------
+  # 1) Windows engine builds (2 parallel variants) + hard SIMD asserts
+  # ------------------------------------------------------------------
+  engine:
+    name: Engine (${{ matrix.variant }})
+    runs-on: windows-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: [safe, fast]
+        include:
+          - variant: safe
+            ggml_native: "OFF"
+            ggml_avx: "OFF"
+            ggml_avx2: "OFF"
+            ggml_fma: "OFF"
+            ggml_f16c: "OFF"
+          - variant: fast
+            ggml_native: "OFF"
+            ggml_avx: "ON"
+            ggml_avx2: "ON"
+            ggml_fma: "ON"
+            ggml_f16c: "ON"
+    env:
+      TARJAMA_ENGINE_VARIANT: ${{ matrix.variant }}
+      TARJAMA_GGML_NATIVE: ${{ matrix.ggml_native }}
+      TARJAMA_GGML_AVX: ${{ matrix.ggml_avx }}
+      TARJAMA_GGML_AVX2: ${{ matrix.ggml_avx2 }}
+      TARJAMA_GGML_FMA: ${{ matrix.ggml_fma }}
+      TARJAMA_GGML_F16C: ${{ matrix.ggml_f16c }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build
-        run: cargo build --release
-      - name: Download whisper models
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: engine-${{ matrix.variant }}
+      - name: Build engine (${{ matrix.variant }})
+        run: cargo build --release -p tarjama-engine
+      - name: Assert compiled SIMD flags
+        shell: bash
         run: |
-          mkdir -p models
-          curl -sL --retry 5 -o models/ggml-tiny-q5_1.bin  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
-          curl -sL --retry 5 -o models/ggml-base-q5_1.bin  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
-          curl -sL --retry 5 -o models/ggml-small-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
-          ls -la models
-      - name: Selftest (native Linux binary)
-        run: ./target/release/tarjama --selftest
-      - name: Upload artifact
+          caps=$(./target/release/tarjama-engine.exe --capabilities)
+          echo "capabilities: $caps"
+          case "${{ matrix.variant }}" in
+            safe)
+              echo "$caps" | grep -q "avx2=0"  || { echo "::error::SAFE build contains AVX2!"; exit 1; }
+              echo "$caps" | grep -q "avx=0"   || { echo "::error::SAFE build contains AVX!";  exit 1; }
+              echo "$caps" | grep -q "fma=0"   || { echo "::error::SAFE build contains FMA!";  exit 1; }
+              echo "$caps" | grep -q "avx512=0" || { echo "::error::SAFE build contains AVX512!"; exit 1; }
+              echo "OK: safe engine is plain SSE2 - runs on every x86_64 CPU"
+              ;;
+            fast)
+              echo "$caps" | grep -q "avx2=1"  || { echo "::error::FAST build lacks AVX2!"; exit 1; }
+              echo "$caps" | grep -q "fma=1"   || { echo "::error::FAST build lacks FMA!";  exit 1; }
+              echo "OK: fast engine has AVX2+FMA+F16C"
+              ;;
+          esac
+      - name: Upload engine artifact
         uses: actions/upload-artifact@v4
         with:
-          name: tarjama-linux-x64
-          path: target/release/tarjama
+          name: engine-${{ matrix.variant }}
+          path: target/release/tarjama-engine.exe
 
-  windows:
-    name: Windows build + package + selftest
+  # ------------------------------------------------------------------
+  # 2) Windows GUI build
+  # ------------------------------------------------------------------
+  gui:
+    name: GUI (Windows)
     runs-on: windows-latest
-    env:
-      WHISPER_NO_NATIVE: "1"
-      WHISPER_NO_AVX: "1"
-      WHISPER_NO_AVX2: "1"
-      WHISPER_NO_FMA: "1"
-      WHISPER_NO_F16C: "1"
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build
-        run: cargo build --release
-      - name: Download whisper models
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gui
+      - name: Build GUI
+        run: cargo build --release -p tarjama-gui
+      - name: Upload GUI artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: gui-windows
+          path: target/release/tarjama.exe
+
+  # ------------------------------------------------------------------
+  # 3) Linux: build, then RUN the real E2E tests on the GitHub runner
+  #    (engine selftest, full video->subtitles pipeline, GUI autotest
+  #     under Xvfb incl. engine-crash fallback verification)
+  # ------------------------------------------------------------------
+  linux-test:
+    name: Linux E2E test (run binaries)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      TARJAMA_ENGINE_VARIANT: safe
+      TARJAMA_GGML_NATIVE: "OFF"
+      TARJAMA_GGML_AVX: "OFF"
+      TARJAMA_GGML_AVX2: "OFF"
+      TARJAMA_GGML_FMA: "OFF"
+      TARJAMA_GGML_F16C: "OFF"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-test
+      - name: Install Xvfb
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq xvfb libxkbcommon-x11-0
+      - name: Build (release)
+        run: cargo build --release -p tarjama-engine -p tarjama-gui
+      - name: Download tiny whisper model
+        run: |
+          mkdir -p models
+          curl -sL --retry 5 -o models/ggml-tiny-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
+          ls -la models
+      - name: Assert safe engine caps
+        run: |
+          caps=$(./target/release/tarjama-engine --capabilities)
+          echo "$caps"
+          echo "$caps" | grep -q "avx2=0" || { echo "::error::safe build has AVX2"; exit 1; }
+      - name: Engine selftest (tiny + MT, real run)
+        run: ./target/release/tarjama-engine --selftest
+      - name: Make short test video
+        run: |
+          mkdir -p testout
+          ffmpeg -y -f lavfi -i color=c=blue:s=320x240:d=7 -i assets/selftest_tr.wav -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest testout/test.mp4 2>/dev/null
+          ffprobe -v error -show_entries format=duration -of csv=p=0 testout/test.mp4
+      - name: Full pipeline on test video (tiny, real run)
+        run: |
+          export TARJAMA_MODELS_DIR=$PWD/models
+          ./target/release/tarjama-engine --cli --input testout/test.mp4 --model tiny --out testout/ep1
+          echo "--- ep1.ar.srt ---"; cat testout/ep1.ar.srt
+          grep -qP '[\x{0600}-\x{06FF}]' testout/ep1.ar.srt || { echo "::error::no Arabic in output"; exit 1; }
+          test -s testout/ep1.bilingual.srt && test -s testout/ep1.ar.vtt && test -s testout/ep1.ar.txt && test -s testout/ep1.tr.txt
+          echo "PIPELINE OK"
+      - name: GUI autotest under Xvfb (incl. crash-fallback)
+        timeout-minutes: 8
+        run: |
+          cp target/release/tarjama-engine target/release/tarjama-engine-safe
+          # simulate a crashing fast engine: GUI must auto-fallback to safe
+          export TARJAMA_ENGINE_FAST=/bin/false
+          export TARJAMA_MODELS_DIR=$PWD/models
+          export TARJAMA_AUTOTEST=1
+          export TARJAMA_AUTOTEST_FILE=$PWD/testout/test.mp4
+          export TARJAMA_AUTOTEST_MODEL=tiny
+          rm -f /tmp/tarjama_autotest_ok
+          Xvfb :99 -screen 0 1280x900x24 &
+          XvfbPid=$!
+          sleep 2
+          export DISPLAY=:99
+          ./target/release/tarjama > /tmp/gui_autotest.log 2>&1 &
+          GuiPid=$!
+          # wait for the app to be up and take an early screenshot
+          sleep 6
+          ffmpeg -y -f x11grab -video_size 1280x900 -i :99 -frames:v 1 testout/gui_startup.png 2>/dev/null || true
+          # wait for the completion marker (max 150s)
+          for i in $(seq 1 150); do
+            [ -f /tmp/tarjama_autotest_ok ] && break
+            sleep 1
+          done
+          sleep 3
+          ffmpeg -y -f x11grab -video_size 1280x900 -i :99 -frames:v 1 testout/gui_results.png 2>/dev/null || true
+          kill $GuiPid 2>/dev/null || true
+          kill $XvfbPid 2>/dev/null || true
+          echo "--- gui autotest log ---"; cat /tmp/gui_autotest.log
+          test -f /tmp/tarjama_autotest_ok || { echo "::error::GUI autotest marker missing"; exit 1; }
+          marker=$(cat /tmp/tarjama_autotest_ok)
+          echo "marker: $marker"
+          echo "$marker" | grep -q "variant=safe" || { echo "::error::fallback to safe engine did not happen"; exit 1; }
+          echo "$marker" | grep -qE "^[0-9]+ " || { echo "::error::no segments produced"; exit 1; }
+          echo "GUI AUTOTEST OK (crash fallback verified)"
+      - name: Upload Linux test evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-test-evidence
+          path: |
+            testout/ep1.ar.srt
+            testout/ep1.bilingual.srt
+            testout/ep1.tr.txt
+            testout/gui_startup.png
+            testout/gui_results.png
+
+  # ------------------------------------------------------------------
+  # 4) Package the Windows zip and RUN the shipped exes on the runner
+  # ------------------------------------------------------------------
+  package:
+    name: Package + run shipped exes (Windows)
+    needs: [engine, gui]
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cache whisper models
+        id: modelcache
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: ggml-q5_1-models-v1
+      - name: Download whisper models (tiny/base/small only)
+        if: steps.modelcache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           mkdir -p models
@@ -54,27 +220,107 @@ jobs:
           curl -sL --retry 5 -o models/ggml-base-q5_1.bin  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
           curl -sL --retry 5 -o models/ggml-small-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
           ls -la models
+      - name: Verify all three models present (tiny/base/small ONLY)
+        shell: bash
+        run: |
+          for f in ggml-tiny-q5_1.bin ggml-base-q5_1.bin ggml-small-q5_1.bin; do
+            test -s "models/$f" || { echo "::error::missing $f"; exit 1; }
+          done
+          n=$(ls models/*.bin 2>/dev/null | wc -l)
+          echo "model files: $n (must be exactly 3)"
+          test "$n" = "3" || { echo "::error::unexpected extra models"; exit 1; }
+      - name: Cache ffmpeg
+        id: ffmpegcache
+        uses: actions/cache@v4
+        with:
+          path: ffmpeg.exe
+          key: ffmpeg-win64-gpl-v1
       - name: Download ffmpeg (bundled)
+        if: steps.ffmpegcache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           curl -sL --retry 5 -o ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip
           unzip -o -q ffmpeg.zip -d ffmpeg_dist
           find ffmpeg_dist -name ffmpeg.exe -exec cp {} ./ffmpeg.exe \;
           ./ffmpeg.exe -version | head -2
-      - name: Selftest (Windows exe, models + MT pipeline)
-        shell: bash
-        run: ./target/release/tarjama.exe --selftest
-      - name: Package portable zip
+      - name: Download built exes
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "{engine-safe,engine-fast,gui-windows}"
+          path: artifacts
+      - name: Assemble portable folder
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist/tarjama/models | Out-Null
-          Copy-Item target/release/tarjama.exe dist/tarjama/
+          Copy-Item artifacts/gui-windows/tarjama.exe dist/tarjama/
+          Copy-Item artifacts/engine-safe/tarjama-engine.exe dist/tarjama/tarjama-engine-safe.exe
+          Copy-Item artifacts/engine-fast/tarjama-engine.exe dist/tarjama/tarjama-engine-fast.exe
           Copy-Item ffmpeg.exe dist/tarjama/
           Copy-Item README.txt dist/tarjama/
           Copy-Item models/ggml-tiny-q5_1.bin  dist/tarjama/models/
           Copy-Item models/ggml-base-q5_1.bin  dist/tarjama/models/
           Copy-Item models/ggml-small-q5_1.bin dist/tarjama/models/
           Copy-Item models/opus-mt -Destination dist/tarjama/models -Recurse
+          Get-ChildItem -Recurse dist | Select-Object FullName,Length
+      - name: RUN shipped safe engine selftest (all models + MT)
+        shell: bash
+        run: |
+          export TARJAMA_MODELS_DIR=$PWD/dist/tarjama/models
+          export TARJAMA_SELFTEST_REQUIRE=all
+          ./dist/tarjama/tarjama-engine-safe.exe --selftest
+      - name: Assert fast engine caps (AVX2)
+        shell: bash
+        run: |
+          caps=$(./dist/tarjama/tarjama-engine-fast.exe --capabilities)
+          echo "$caps"
+          echo "$caps" | grep -q "avx2=1" || { echo "::error::fast engine lacks AVX2"; exit 1; }
+      - name: Make short test video
+        shell: bash
+        run: |
+          mkdir -p testout
+          ./ffmpeg.exe -y -f lavfi -i color=c=blue:s=320x240:d=7 -i assets/selftest_tr.wav -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest testout/test.mp4 2>/dev/null
+          ls -la testout
+      - name: RUN full pipeline with shipped safe engine (tiny on test video)
+        shell: bash
+        run: |
+          export TARJAMA_MODELS_DIR=$PWD/dist/tarjama/models
+          ./dist/tarjama/tarjama-engine-safe.exe --cli --input testout/test.mp4 --model tiny --out testout/ep1
+          echo "--- ep1.ar.srt ---"; cat testout/ep1.ar.srt
+          grep -qP '[\x{0600}-\x{06FF}]' testout/ep1.ar.srt || { echo "::error::no Arabic in output"; exit 1; }
+          echo "SHIPPED ENGINE E2E OK"
+      - name: RUN full pipeline with shipped fast engine
+        shell: bash
+        run: |
+          export TARJAMA_MODELS_DIR=$PWD/dist/tarjama/models
+          ./dist/tarjama/tarjama-engine-fast.exe --cli --input testout/test.mp4 --model tiny --out testout/ep1fast
+          grep -qP '[\x{0600}-\x{06FF}]' testout/ep1fast.ar.srt || { echo "::error::no Arabic (fast engine)"; exit 1; }
+          echo "FAST ENGINE E2E OK"
+      - name: GUI smoke test on Windows (best effort)
+        id: guitest
+        continue-on-error: true
+        shell: bash
+        run: |
+          export TARJAMA_MODELS_DIR=$PWD/dist/tarjama/models
+          export TARJAMA_AUTOTEST=1
+          export TARJAMA_AUTOTEST_FILE=$PWD/testout/test.mp4
+          export TARJAMA_AUTOTEST_MODEL=tiny
+          rm -f "$TEMP/tarjama_autotest_ok"
+          ./dist/tarjama/tarjama.exe > gui_autotest.log 2>&1 &
+          for i in $(seq 1 150); do
+            [ -f "$TEMP/tarjama_autotest_ok" ] && break
+            sleep 1
+          done
+          cat gui_autotest.log || true
+          if [ -f "$TEMP/tarjama_autotest_ok" ]; then
+            echo "marker: $(cat "$TEMP/tarjama_autotest_ok")"
+            echo "GUI WINDOWS AUTOTEST OK"
+          else
+            echo "::warning::GUI autotest inconclusive on headless runner (window session may be unavailable)"
+            exit 1
+          fi
+      - name: Package portable zip
+        shell: pwsh
+        run: |
           Compress-Archive -Path dist/tarjama -DestinationPath TarjamaNative-Windows-x64.zip
           Get-Item TarjamaNative-Windows-x64.zip | Select-Object Name,Length
       - name: Verify zip contents
@@ -84,18 +330,23 @@ jobs:
           $z = [System.IO.Compression.ZipFile]::OpenRead("$PWD/TarjamaNative-Windows-x64.zip")
           $names = $z.Entries.FullName
           $z.Dispose()
-          @("tarjama/tarjama.exe","tarjama/ffmpeg.exe","tarjama/models/ggml-small-q5_1.bin","tarjama/models/opus-mt/encoder_model.int8.onnx") | ForEach-Object {
+          @("tarjama/tarjama.exe","tarjama/tarjama-engine-safe.exe","tarjama/tarjama-engine-fast.exe","tarjama/ffmpeg.exe",
+            "tarjama/models/ggml-tiny-q5_1.bin","tarjama/models/ggml-base-q5_1.bin","tarjama/models/ggml-small-q5_1.bin",
+            "tarjama/models/opus-mt/encoder_model.int8.onnx") | ForEach-Object {
             if ($names -notcontains $_) { Write-Error "missing in zip: $_"; exit 1 } else { Write-Host "ok $_" }
           }
-      - name: Upload artifact
+      - name: Upload Windows zip artifact
         uses: actions/upload-artifact@v4
         with:
           name: TarjamaNative-Windows-x64
           path: TarjamaNative-Windows-x64.zip
 
+  # ------------------------------------------------------------------
+  # 5) Release
+  # ------------------------------------------------------------------
   release:
     name: Publish release
-    needs: [windows, linux]
+    needs: [package, linux-test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -105,17 +356,20 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: Tarjama Studio Native v1.0.${{ github.run_number }}
+          tag_name: v1.1.${{ github.run_number }}
+          name: Tarjama Studio Native v1.1.${{ github.run_number }}
           body: |
-            Portable, fully offline Windows build (x64). No installer needed - unzip and run tarjama.exe.
+            Portable, fully offline Windows build (x64). Unzip and run tarjama.exe.
 
-            Bundled models (quantized, compressed):
-            - Whisper Tiny q5_1 (32 MB), Base q5_1 (60 MB), Small q5_1 (190 MB) - Turkish recognition
-            - OPUS-MT tr->ar int8 ONNX (encoder + decoder) - Arabic translation
+            v1.1: fixed crash-on-translate on CPUs without AVX2/AVX512.
+            - Two engines ship in the box: tarjama-engine-fast (AVX2, auto-selected on modern CPUs)
+              and tarjama-engine-safe (plain SSE2, runs on EVERY x86_64 CPU).
+            - The engine runs as a separate process: if it ever fails, the app shows a readable
+              error and automatically retries with the safe engine instead of closing.
+            - Cancel now really stops processing. Live elapsed time + heartbeat in the status bar.
 
-            Includes ffmpeg.exe (GPL build) for reading every video/audio format.
-            Everything runs on CPU - no GPU, no internet required.
+            Bundled compressed models (Tiny 32 MB, Base 60 MB, Small 190 MB q5_1 + OPUS-MT tr->ar int8).
+            ffmpeg.exe included. Everything on CPU - no GPU, no internet, no downloads.
           files: TarjamaNative-Windows-x64.zip
           draft: false
           prerelease: false

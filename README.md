@@ -3,35 +3,42 @@
 Standalone, fully offline desktop app: **Turkish video/audio -> Arabic subtitles**.
 Pure native Rust (no web technologies, no browser, no installer, no internet).
 
-- Whisper speech recognition (whisper.cpp via whisper-rs) - models **Tiny / Base / Small** (quantized q5_1) bundled. No Medium, no Large.
-- Turkish -> Arabic translation (OPUS-MT, int8-quantized ONNX Runtime) bundled.
-- ffmpeg.exe (GPL build) bundled - reads every common video/audio format.
-- Native GUI (iced) - renders Arabic (RTL) and Turkish correctly.
-- Runs entirely on CPU, tuned to work on old/low-end machines (SSE-only build).
+## v1.1 - reliability overhaul
 
-## Use (Windows)
+The v1.0 build crashed at "Transcribing..." on CPUs without AVX2/AVX512: the C
+build silently baked the GitHub runner's CPU features into the exe (the
+`WHISPER_NO_*` env vars were ignored by whisper-rs-sys 0.11). v1.1 fixes this
+properly, in three independent layers:
 
-1. Download `TarjamaNative-Windows-x64.zip` from Releases and unzip it anywhere.
-2. Double-click `tarjama.exe`.
-3. Pick a video/audio file, choose a model, press **TRANSLATE**.
-4. Export SRT (Arabic), bilingual SRT, VTT or TXT - files are written next to your video.
+1. **Correct builds** - `vendor/whisper-rs-sys` is a patched fork that forwards
+   `TARJAMA_GGML_*` env vars as real CMake cache variables. CI builds two
+   engines and *asserts the compiled instruction sets* via `ggml_cpu_has_*`:
+   - `tarjama-engine-safe`  - plain SSE2, runs on **every** x86_64 CPU
+   - `tarjama-engine-fast`  - AVX2+FMA+F16C, auto-selected on modern CPUs
+2. **Crash isolation** - the engine runs as a **separate process**; the GUI
+   streams JSON events from it. A native crash can never close the app:
+   the UI shows a readable error and automatically retries with the safe engine.
+3. **Verified behavior** - CI actually *runs* the shipped exes on the Windows
+   runner: engine selftest (ASR + MT), full pipeline on a generated test video
+   for both engines, and a scripted GUI autotest (Linux, under Xvfb) that
+   also simulates a fast-engine crash to prove the automatic fallback.
 
-If SmartScreen warns about an unsigned app: click "More info" -> "Run anyway".
-
-## Build from source
-
-Requires Rust (stable) and cmake. `cargo build --release` - GitHub Actions does this automatically on every push (see `.github/workflows/build.yml`), runs a full pipeline selftest on Windows and Linux runners, and publishes a portable zip.
-
-## CLI
+## Layout
 
 ```
-tarjama.exe --cli --input movie.mp4 --model small --out C:\subs\ep1
-tarjama.exe --selftest
+crates/tarjama-core     shared types, JSON event protocol, SRT/glossary/wav
+crates/tarjama-engine   whisper.cpp (ASR) + ONNX OPUS-MT tr->ar (translation)
+crates/tarjama-gui      iced native UI (tarjama.exe), spawns the engine
+vendor/whisper-rs-sys   patched fork (TARJAMA_GGML_* pass-through)
 ```
 
-## Model licenses
+## Models (bundled, compressed)
 
-- Whisper models: MIT (OpenAI) via whisper.cpp ggml quantizations
-- OPUS-MT (Helsinki-NLP/opus-mt-tr-ar): CC-BY 4.0 / Apache-2.0 (OPUS data)
-- Noto fonts: OFL 1.1
-- ffmpeg.exe: GPL v3 build (BtbN) - kept as a separate process, not linked
+Only three whisper models are included, quantized q5_1:
+Tiny (32 MB), Base (60 MB), Small (190 MB) - plus OPUS-MT tr->ar int8 ONNX.
+Medium and Large-v3 Turbo are intentionally NOT part of this app.
+
+## CI
+
+`.github/workflows/build.yml` builds everything on GitHub, caches models and
+ffmpeg, publishes a portable zip as artifact + GitHub release.

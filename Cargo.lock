@@ -3736,18 +3736,36 @@ dependencies = [
 ]
 
 [[package]]
-name = "tarjama"
-version = "1.0.0"
+name = "tarjama-core"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "tarjama-engine"
+version = "1.1.0"
+dependencies = [
+ "anyhow",
+ "ort",
+ "serde_json",
+ "tarjama-core",
+ "tokenizers",
+ "whisper-rs",
+]
+
+[[package]]
+name = "tarjama-gui"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "iced",
  "open",
- "ort",
  "rfd",
- "serde",
  "serde_json",
- "tokenizers",
- "whisper-rs",
+ "tarjama-core",
 ]
 
 [[package]]
@@ -4434,8 +4452,6 @@ dependencies = [
 [[package]]
 name = "whisper-rs-sys"
 version = "0.11.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "76bab42b2c319e3a1e0280137c59368072348d3277873c7588b6466a127dca58"
 dependencies = [
  "bindgen",
  "cfg-if",

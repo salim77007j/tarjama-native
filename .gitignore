@@ -2,7 +2,6 @@ target/
 models/*.bin
 models/.dl_status
 models/dl.log
-scripts/_marian_tmp/
+testout/
 nohup.out
 *.log
-testmedia/

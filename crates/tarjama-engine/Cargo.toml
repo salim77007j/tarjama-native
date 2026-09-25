@@ -1,0 +1,18 @@
+[package]
+name = "tarjama-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Offline TR->AR pipeline engine (whisper.cpp + ONNX MT), crash-isolated subprocess"
+
+[[bin]]
+name = "tarjama-engine"
+path = "src/main.rs"
+
+[dependencies]
+tarjama-core = { path = "../tarjama-core" }
+whisper-rs = "0.13.2"
+ort = "=2.0.0-rc.10"
+tokenizers = "0.21"
+anyhow = "1"
+serde_json = "1"
