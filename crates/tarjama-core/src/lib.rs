@@ -14,7 +14,9 @@ pub mod srt;
 pub const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Bundled whisper models. Tiny / Base / Small ONLY - medium and large-v3
-/// turbo are intentionally not part of this application.
+/// turbo are intentionally not part of this application. Q8_0 quantization:
+/// near-lossless 8-bit (same precision class as the web app's int8), unlike
+/// the 5-bit q5_1 used before v1.3.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Kind {
     Tiny,
@@ -29,17 +31,17 @@ impl Kind {
 
     pub fn file(self) -> &'static str {
         match self {
-            Kind::Tiny => "ggml-tiny-q5_1.bin",
-            Kind::Base => "ggml-base-q5_1.bin",
-            Kind::Small => "ggml-small-q5_1.bin",
+            Kind::Tiny => "ggml-tiny-q8_0.bin",
+            Kind::Base => "ggml-base-q8_0.bin",
+            Kind::Small => "ggml-small-q8_0.bin",
         }
     }
 
     pub fn label(self) -> &'static str {
         match self {
-            Kind::Tiny => "Tiny  (32 MB - fastest)",
-            Kind::Base => "Base  (60 MB - balanced)",
-            Kind::Small => "Small (190 MB - best quality)",
+            Kind::Tiny => "Tiny  (43 MB - fastest)",
+            Kind::Base => "Base  (80 MB - balanced)",
+            Kind::Small => "Small (270 MB - best quality)",
         }
     }
 
@@ -119,28 +121,29 @@ pub struct JobSpec {
     pub n_threads: i32,
 }
 
-/// Resolve the directory containing bundled models (ggml-*.bin + opus-mt/).
+/// Resolve the directory containing bundled models (ggml-*.bin + mt/).
 pub fn models_dir() -> Result<PathBuf> {
+    let ok = |p: &Path| p.join("mt").join("tr-ar").is_dir() || p.join("opus-mt").is_dir();
     if let Ok(p) = std::env::var("TARJAMA_MODELS_DIR") {
         let p = PathBuf::from(p);
-        if p.join("opus-mt").is_dir() {
+        if ok(&p) {
             return Ok(p);
         }
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(d) = exe.parent() {
             let p = d.join("models");
-            if p.join("opus-mt").is_dir() {
+            if ok(&p) {
                 return Ok(p);
             }
             if let Some(d2) = d.parent() {
                 let p2 = d2.join("models");
-                if p2.join("opus-mt").is_dir() {
+                if ok(&p2) {
                     return Ok(p2);
                 }
                 if let Some(d3) = d2.parent() {
                     let p3 = d3.join("models");
-                    if p3.join("opus-mt").is_dir() {
+                    if ok(&p3) {
                         return Ok(p3);
                     }
                 }
@@ -148,11 +151,11 @@ pub fn models_dir() -> Result<PathBuf> {
         }
     }
     let p = PathBuf::from("models");
-    if p.join("opus-mt").is_dir() {
+    if ok(&p) {
         return Ok(p);
     }
     Err(anyhow!(
-        "models folder not found: it must sit next to tarjama.exe (models/ggml-*.bin + models/opus-mt/)"
+        "models folder not found: it must sit next to tarjama.exe (models/ggml-*.bin + models/mt/)"
     ))
 }
 

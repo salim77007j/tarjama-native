@@ -104,6 +104,16 @@ fn real_main() -> Result<()> {
             println!("{}", caps_line());
             Ok(())
         }
+        "--mt-debug" => {
+            // Debug: translate the given text. Usage: tarjama-engine --mt-debug "metin"
+            announce("mt-debug");
+            let text = args.get(1).ok_or_else(|| anyhow::anyhow!("--mt-debug requires text"))?;
+            let mdir = tarjama_core::models_dir()?;
+            let mut tr = translate::Translator::load(&mdir)?;
+            let ar = tr.translate(text)?;
+            println!("AR: {ar}");
+            Ok(())
+        }
         "--selftest" => {
             announce("selftest");
             selftest()
@@ -152,18 +162,19 @@ fn selftest() -> Result<()> {
             }
         }
     }
-    let mt = mdir.join("opus-mt");
-    for f in [
-        "encoder_model.int8.onnx",
-        "decoder_model.int8.onnx",
-        "tokenizer.json",
-        "meta.json",
-    ] {
-        let p = mt.join(f);
-        let meta = std::fs::metadata(&p)
-            .map_err(|_| anyhow::anyhow!("MISSING translation file: {}", p.display()))?;
-        println!("  ok opus-mt/{f} ({:.1} MB)", meta.len() as f64 / 1e6);
+    let mt_ok = {
+        let p = mdir.join("mt").join("tr-ar");
+        ["encoder_model.int8.onnx", "decoder_model.int8.onnx", "decoder_with_past_model.int8.onnx", "tokenizer.json", "meta.json"]
+            .iter()
+            .all(|f| p.join(f).is_file())
+    };
+    if !mt_ok {
+        anyhow::bail!(
+            "MISSING translation model: need {}/mt/tr-ar/* (encoder + decoder + decoder_with_past int8, tokenizer, meta)",
+            mdir.display()
+        );
     }
+    println!("  ok mt/tr-ar (OPUS-MT int8, beam search x{})", 4);
 
     let samples = tarjama_core::decode_wav(SELFTEST_WAV)?;
     println!(
@@ -195,10 +206,10 @@ fn selftest() -> Result<()> {
     }
 
     let t = Instant::now();
-    let mut tr = translate::Translator::load(&mt)?;
+    let mut tr = translate::Translator::load(&mdir)?;
     let ar = tr.translate(joined.trim())?;
     let dt_mt = t.elapsed().as_secs_f32();
-    println!("MT: {:.2}s -> {ar}", dt_mt);
+    println!("MT (beam 4): {:.2}s -> {ar}", dt_mt);
     if !ar.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c)) {
         bail!("translation produced no Arabic characters: {ar:?}");
     }
@@ -252,6 +263,11 @@ fn cli(args: &[String]) -> Result<()> {
         bail!("input file not found: {}", input.display());
     }
     let out = out.unwrap_or_else(|| input.with_extension(""));
+    if let Some(d) = out.parent() {
+        if !d.as_os_str().is_empty() {
+            let _ = std::fs::create_dir_all(d);
+        }
+    }
     let mdir = tarjama_core::models_dir()?;
 
     let job = tarjama_core::JobSpec {

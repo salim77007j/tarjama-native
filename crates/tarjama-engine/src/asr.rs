@@ -41,12 +41,16 @@ pub fn transcribe(
             .min(8),
     };
 
-    let mut params = whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::Greedy {
-        best_of: 1,
+    let mut params = whisper_rs::FullParams::new(whisper_rs::SamplingStrategy::BeamSearch {
+        beam_size: 5,
+        patience: -1.0,
     });
     params.set_language(Some("tr"));
     params.set_translate(false);
     params.set_n_threads(cores);
+    // Match the web app's condition_on_previous_text=False: do not feed past
+    // tokens as context for later windows (prevents hallucination loops).
+    params.set_no_context(true);
     params.set_print_progress(false);
     params.set_print_special(false);
     params.set_print_realtime(false);

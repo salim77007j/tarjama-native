@@ -59,19 +59,27 @@ pub fn run_collect(job: &JobSpec) -> Result<Vec<Seg>> {
         bail!("No speech detected in this file");
     }
 
-    // 3) Translate to Arabic
+    // 3) Translate to Arabic (OPUS-MT int8, beam search, v1.3)
     emit_stage("loading-mt");
-    let mut tr = crate::translate::Translator::load(&mdir.join("opus-mt"))
-        .context("Failed to load translation model (models/opus-mt)")?;
+    let mut tr = crate::translate::Translator::load(mdir)
+        .context("Failed to load translation model (models/mt/tr-ar)")?;
     emit_stage("translate");
     let n = raw.len();
     let mut segs = Vec::with_capacity(n);
     for (i, r) in raw.iter().enumerate() {
-        let ar = tr.translate(&r.text).unwrap_or_default();
+        // whisper (especially tiny/base) sometimes wraps segments in stray
+        // quotation marks; they are noise for MT and for subtitles.
+        let clean: String = r
+            .text
+            .replace(['"', '\u{201C}', '\u{201D}'], "")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let ar = tr.translate(&clean).unwrap_or_default();
         segs.push(Seg {
             t0: r.t0,
             t1: r.t1,
-            tr: r.text.clone(),
+            tr: clean,
             ar,
         });
         tarjama_core::emit(&tarjama_core::EngineEvent::Mt { a: i + 1, b: n });

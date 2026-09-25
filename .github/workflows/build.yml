@@ -192,7 +192,7 @@ jobs:
       - name: Download tiny whisper model
         run: |
           mkdir -p models
-          curl -sL --retry 5 -o models/ggml-tiny-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
+          curl -sL --retry 5 -o models/ggml-tiny-q8_0.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q8_0.bin
           ls -la models
       - name: Engine selftest (tiny + MT, real run)
         run: ./target/release/tarjama-engine --selftest
@@ -273,20 +273,20 @@ jobs:
         uses: actions/cache@v4
         with:
           path: models
-          key: ggml-q5_1-models-v1
+          key: ggml-q8_0-models-v1
       - name: Download whisper models (tiny/base/small only)
         if: steps.modelcache.outputs.cache-hit != 'true'
         shell: bash
         run: |
           mkdir -p models
-          curl -sL --retry 5 -o models/ggml-tiny-q5_1.bin  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
-          curl -sL --retry 5 -o models/ggml-base-q5_1.bin  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q5_1.bin
-          curl -sL --retry 5 -o models/ggml-small-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q5_1.bin
+          curl -sL --retry 5 -o models/ggml-tiny-q8_0.bin  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q8_0.bin
+          curl -sL --retry 5 -o models/ggml-base-q8_0.bin  https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base-q8_0.bin
+          curl -sL --retry 5 -o models/ggml-small-q8_0.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small-q8_0.bin
           ls -la models
       - name: Verify all three models present (tiny/base/small ONLY)
         shell: bash
         run: |
-          for f in ggml-tiny-q5_1.bin ggml-base-q5_1.bin ggml-small-q5_1.bin; do
+          for f in ggml-tiny-q8_0.bin ggml-base-q8_0.bin ggml-small-q8_0.bin; do
             test -s "models/$f" || { echo "::error::missing $f"; exit 1; }
           done
           n=$(ls models/*.bin 2>/dev/null | wc -l)
@@ -321,10 +321,10 @@ jobs:
           Copy-Item artifacts/engine-gpu/tarjama-engine.exe dist/tarjama/tarjama-engine-gpu.exe
           Copy-Item ffmpeg.exe dist/tarjama/
           Copy-Item README.txt dist/tarjama/
-          Copy-Item models/ggml-tiny-q5_1.bin  dist/tarjama/models/
-          Copy-Item models/ggml-base-q5_1.bin  dist/tarjama/models/
-          Copy-Item models/ggml-small-q5_1.bin dist/tarjama/models/
-          Copy-Item models/opus-mt -Destination dist/tarjama/models -Recurse
+          Copy-Item models/ggml-tiny-q8_0.bin  dist/tarjama/models/
+          Copy-Item models/ggml-base-q8_0.bin  dist/tarjama/models/
+          Copy-Item models/ggml-small-q8_0.bin dist/tarjama/models/
+          Copy-Item models/mt -Destination dist/tarjama/models -Recurse
           Get-ChildItem -Recurse dist | Select-Object FullName,Length
       - name: RUN shipped safe engine selftest (all models + MT)
         shell: bash
@@ -435,8 +435,8 @@ jobs:
           $names = $z.Entries.FullName
           $z.Dispose()
           @("tarjama/tarjama.exe","tarjama/tarjama-engine-safe.exe","tarjama/tarjama-engine-fast.exe","tarjama/tarjama-engine-gpu.exe","tarjama/ffmpeg.exe",
-            "tarjama/models/ggml-tiny-q5_1.bin","tarjama/models/ggml-base-q5_1.bin","tarjama/models/ggml-small-q5_1.bin",
-            "tarjama/models/opus-mt/encoder_model.int8.onnx") | ForEach-Object {
+            "tarjama/models/ggml-tiny-q8_0.bin","tarjama/models/ggml-base-q8_0.bin","tarjama/models/ggml-small-q8_0.bin",
+            "tarjama/models/mt/tr-ar/encoder_model.int8.onnx","tarjama/models/mt/tr-ar/decoder_with_past_model.int8.onnx") | ForEach-Object {
             if ($names -notcontains $_) { Write-Error "missing in zip: $_"; exit 1 } else { Write-Host "ok $_" }
           }
       - name: Upload Windows zip artifact
@@ -460,25 +460,29 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.2.${{ github.run_number }}
-          name: Tarjama Studio Native v1.2.${{ github.run_number }}
+          tag_name: v1.3.${{ github.run_number }}
+          name: Tarjama Studio Native v1.3.${{ github.run_number }}
           body: |
             Portable, fully offline Windows build (x64). Unzip and run tarjama.exe.
 
-            v1.2: GPU ACCELERATION - the app now uses your graphics card for transcription.
-            - New tarjama-engine-gpu.exe runs whisper on the GPU via Vulkan (Intel, AMD and
-              NVIDIA - integrated laptop graphics included). A 2-minute video that took minutes
-              on the safe CPU engine should now complete in a fraction of the time.
-            - The app auto-detects your GPU and picks the best engine for your machine:
-              gpu (Vulkan) -> fast (AVX2) -> safe (SSE2). If the GPU engine ever fails to
-              start or crashes, the app retries automatically with the next engine.
-            - The log pane now shows which compute backend really ran
-              ("compute backend: GPU (Vulkan) - <your GPU name>" or "CPU").
-            - Everything still works fully offline; CPU-only machines keep working exactly
-              as before. Set TARJAMA_NO_GPU=1 to force CPU for debugging.
+            v1.3: SUBTITLE QUALITY OVERHAUL - translation and transcription accuracy
+            now match the web studio much more closely.
+            - Whisper models upgraded from 5-bit q5_1 to 8-bit q8_0 (near-lossless,
+              same precision class as the web app's int8 models).
+            - Whisper now decodes with beam search (beam 5) instead of greedy,
+              and no longer carries previous text as context (prevents
+              hallucination loops on music/repeats), matching the web pipeline.
+            - Translation engine rebuilt: OPUS-MT (ONNX int8) now decodes with
+              BEAM SEARCH (beam 4, length penalty 0.2) instead of greedy - this
+              was the biggest single quality jump. Verified sentence-by-sentence
+              against reference translations.
+            - Stray quotation-mark artifacts from the ASR are stripped before
+              translation and subtitles.
+            - GPU (Vulkan) acceleration from v1.2 unchanged: gpu -> fast -> safe
+              engine auto-fallback. TARJAMA_NO_GPU=1 forces CPU.
 
-            Bundled compressed models (Tiny 32 MB, Base 60 MB, Small 190 MB q5_1 + OPUS-MT tr->ar int8).
-            ffmpeg.exe included. No internet, no downloads.
+            Bundled models (Tiny 43 MB, Base 80 MB, Small 270 MB q8_0 + OPUS-MT tr->ar int8 beam).
+            For best quality pick the Small model. ffmpeg.exe included. No internet, no downloads.
           files: TarjamaNative-Windows-x64.zip
           draft: false
           prerelease: false

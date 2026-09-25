@@ -1,11 +1,24 @@
-Tarjama Studio Native v1.2 - portable, fully offline
+Tarjama Studio Native v1.3 - portable, fully offline
 =====================================================
 
-WHAT'S NEW IN v1.2 - GPU ACCELERATION
-  - The app now transcribes on your GRAPHICS CARD via the Vulkan engine
-    (tarjama-engine-gpu.exe). This works with Intel, AMD and NVIDIA GPUs,
-    including integrated laptop graphics. A 2-minute video that used to take
-    minutes on the CPU engine should now finish in a fraction of the time.
+WHAT'S NEW IN v1.3 - SUBTITLE QUALITY OVERHAUL
+  - Whisper models upgraded from 5-bit (q5_1) to 8-bit (q8_0) quantization:
+    near-lossless, the same precision class as the web studio's int8 models.
+  - Whisper now decodes with BEAM SEARCH (beam 5) instead of greedy, and no
+    longer carries previous text into the next window (prevents hallucination
+    loops on music, silence and repeats) - matching the web pipeline.
+  - Translation engine rebuilt: OPUS-MT (ONNX int8) now decodes with BEAM
+    SEARCH (beam 4, length penalty 0.2) instead of greedy. This was the
+    biggest single quality jump, verified sentence-by-sentence against
+    reference translations.
+  - Stray quotation-mark artifacts from the ASR are stripped before
+    translation and before writing subtitles.
+  - TIP: for the best subtitle quality pick the SMALL model.
+
+WHAT WAS NEW IN v1.2 - GPU ACCELERATION
+  - The app transcribes on your GRAPHICS CARD via the Vulkan engine
+    (tarjama-engine-gpu.exe). Works with Intel, AMD and NVIDIA GPUs,
+    including integrated laptop graphics.
   - The app picks the best engine automatically for your machine:
       tarjama-engine-gpu.exe  GPU (Vulkan) - used when a supported GPU exists
       tarjama-engine-fast.exe AVX2 CPU build - used on modern CPUs without GPU
@@ -38,9 +51,9 @@ RUN
   No internet is needed, ever.
 
 MODELS (bundled, compressed - nothing else exists in this app)
-  Tiny  (32 MB)  - fastest, lowest quality
-  Base  (60 MB)  - balanced
-  Small (190 MB) - best quality (recommended for TV series)
+  Tiny  (43 MB)  - fastest, lowest quality
+  Base  (80 MB)  - balanced
+  Small (270 MB) - best quality (recommended for TV series)
 
 COMMAND LINE
   tarjama.exe --cli --input video.mp4 --model small --out C:\subs\ep1
