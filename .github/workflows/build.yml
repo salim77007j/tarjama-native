@@ -83,8 +83,13 @@ jobs:
           # 3) Vulkan loader DLL (TEST ONLY, not shipped): MSYS2 build of the Khronos loader
           curl.exe -sL --retry 3 -o "$env:RUNNER_TEMP\vkloader.zst" "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-vulkan-loader-1~1.4.357.0-1-any.pkg.tar.zst"
           if (!(Test-Path "$env:RUNNER_TEMP\vkloader.zst")) { curl.exe -sL --retry 3 -o "$env:RUNNER_TEMP\vkloader.zst" "https://archive.msys2.org/mingw/mingw64/mingw-w64-x86_64-vulkan-loader-1~1.4.357.0-1-any.pkg.tar.zst" }
-          & $7z x -y "-o$env:RUNNER_TEMP\vkloader" "$env:RUNNER_TEMP\vkloader.zst" | Out-Null
-          & $7z x -y "-o$env:RUNNER_TEMP\vkloader2" "$env:RUNNER_TEMP\vkloader\vkloader.pkg.tar" | Out-Null
+          # .zst packages need the real zstd tool (runner 7-Zip may lack zstd support)
+          curl.exe -sL --retry 3 -o "$env:RUNNER_TEMP\zstd.zip" "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-v1.5.7-win64.zip"
+          Expand-Archive "$env:RUNNER_TEMP\zstd.zip" -DestinationPath "$env:RUNNER_TEMP\zstd" -Force
+          & "$env:RUNNER_TEMP\zstd\zstd-v1.5.7-win64\zstd.exe" -d -q "$env:RUNNER_TEMP\vkloader.zst" -o "$env:RUNNER_TEMP\vkloader.tar"
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\vkloader2" | Out-Null
+          tar -xf "$env:RUNNER_TEMP\vkloader.tar" -C "$env:RUNNER_TEMP\vkloader2"
+          if (!(Test-Path "$env:RUNNER_TEMP\vkloader2\mingw64\bin\vulkan-1.dll")) { Write-Error "vulkan-1.dll not found in MSYS2 loader package"; exit 1 }
           Copy-Item "$env:RUNNER_TEMP\vkloader2\mingw64\bin\vulkan-1.dll" "$env:RUNNER_TEMP\vulkan-1.dll"
           # 4) import library source (def) - converted to .lib in the next step
           curl.exe -sL --retry 3 -o "$env:RUNNER_TEMP\vulkan-1.def" "https://raw.githubusercontent.com/KhronosGroup/Vulkan-Loader/v1.4.304/loader/vulkan-1.def"
@@ -339,10 +344,12 @@ jobs:
           # TEST-ONLY loader: the GPU-less runner has no vulkan-1.dll, so drop
           # the MSYS2 Khronos loader next to the exe for this test. It is NOT
           # shipped in the zip - real machines get the loader from GPU drivers.
+          curl -sL --retry 3 -o zstd.zip "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-v1.5.7-win64.zip"
+          unzip -o -q zstd.zip -d zstd_dist
           curl -sL --retry 3 -o vulkan-1.dll.zst "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-vulkan-loader-1~1.4.357.0-1-any.pkg.tar.zst"
-          7z x -y -o vkloader_pkg vulkan-1.dll.zst > /dev/null
-          7z x -y -o vkloader_x vkloader_pkg/vkloader.pkg.tar > /dev/null
-          cp vkloader_x/mingw64/bin/vulkan-1.dll dist/tarjama/vulkan-1.dll
+          ./zstd_dist/zstd-v1.5.7-win64/zstd.exe -d -q vulkan-1.dll.zst -o vkloader.tar
+          tar -xf vkloader.tar
+          cp mingw64/bin/vulkan-1.dll dist/tarjama/vulkan-1.dll
           caps=$(cd dist/tarjama && ./tarjama-engine-gpu.exe --capabilities)
           echo "$caps"
           echo "$caps" | grep -q "avx2=0"   || { echo "::error::gpu engine has AVX2 CPU ops"; exit 1; }
