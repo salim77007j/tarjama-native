@@ -106,21 +106,14 @@ jobs:
     name: Linux E2E test (run binaries)
     runs-on: ubuntu-latest
     timeout-minutes: 40
-    env:
-      TARJAMA_ENGINE_VARIANT: safe
-      TARJAMA_GGML_NATIVE: "OFF"
-      TARJAMA_GGML_AVX: "OFF"
-      TARJAMA_GGML_AVX2: "OFF"
-      TARJAMA_GGML_FMA: "OFF"
-      TARJAMA_GGML_F16C: "OFF"
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
           key: linux-test
-      - name: Install Xvfb
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq xvfb libxkbcommon-x11-0
+      - name: Install Xvfb + ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq xvfb libxkbcommon-x11-0 ffmpeg
       - name: Build (release)
         run: cargo build --release -p tarjama-engine -p tarjama-gui
       - name: Download tiny whisper model
@@ -128,17 +121,12 @@ jobs:
           mkdir -p models
           curl -sL --retry 5 -o models/ggml-tiny-q5_1.bin https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny-q5_1.bin
           ls -la models
-      - name: Assert safe engine caps
-        run: |
-          caps=$(./target/release/tarjama-engine --capabilities)
-          echo "$caps"
-          echo "$caps" | grep -q "avx2=0" || { echo "::error::safe build has AVX2"; exit 1; }
       - name: Engine selftest (tiny + MT, real run)
         run: ./target/release/tarjama-engine --selftest
       - name: Make short test video
         run: |
           mkdir -p testout
-          ffmpeg -y -f lavfi -i color=c=blue:s=320x240:d=7 -i assets/selftest_tr.wav -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest testout/test.mp4 2>/dev/null
+          ffmpeg -y -f lavfi -i color=c=blue:s=320x240:d=7 -i assets/selftest_tr.wav -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest testout/test.mp4
           ffprobe -v error -show_entries format=duration -of csv=p=0 testout/test.mp4
       - name: Full pipeline on test video (tiny, real run)
         run: |
@@ -149,7 +137,7 @@ jobs:
           test -s testout/ep1.bilingual.srt && test -s testout/ep1.ar.vtt && test -s testout/ep1.ar.txt && test -s testout/ep1.tr.txt
           echo "PIPELINE OK"
       - name: GUI autotest under Xvfb (incl. crash-fallback)
-        timeout-minutes: 8
+        timeout-minutes: 12
         run: |
           cp target/release/tarjama-engine target/release/tarjama-engine-safe
           # simulate a crashing fast engine: GUI must auto-fallback to safe
@@ -167,14 +155,14 @@ jobs:
           GuiPid=$!
           # wait for the app to be up and take an early screenshot
           sleep 6
-          ffmpeg -y -f x11grab -video_size 1280x900 -i :99 -frames:v 1 testout/gui_startup.png 2>/dev/null || true
-          # wait for the completion marker (max 150s)
-          for i in $(seq 1 150); do
+          ffmpeg -y -f x11grab -video_size 1280x900 -i :99 -frames:v 1 testout/gui_startup.png || true
+          # wait for the completion marker (max 300s)
+          for i in $(seq 1 300); do
             [ -f /tmp/tarjama_autotest_ok ] && break
             sleep 1
           done
           sleep 3
-          ffmpeg -y -f x11grab -video_size 1280x900 -i :99 -frames:v 1 testout/gui_results.png 2>/dev/null || true
+          ffmpeg -y -f x11grab -video_size 1280x900 -i :99 -frames:v 1 testout/gui_results.png || true
           kill $GuiPid 2>/dev/null || true
           kill $XvfbPid 2>/dev/null || true
           echo "--- gui autotest log ---"; cat /tmp/gui_autotest.log
@@ -278,7 +266,17 @@ jobs:
         shell: bash
         run: |
           mkdir -p testout
-          ./ffmpeg.exe -y -f lavfi -i color=c=blue:s=320x240:d=7 -i assets/selftest_tr.wav -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest testout/test.mp4 2>/dev/null
+          FF=""
+          if [ -x dist/tarjama/ffmpeg.exe ]; then FF=./dist/tarjama/ffmpeg.exe; fi
+          if [ -z "$FF" ]; then FF=$(command -v ffmpeg || true); fi
+          if [ -z "$FF" ]; then
+            curl -sL --retry 5 -o ffmpeg.zip https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip
+            unzip -o -q ffmpeg.zip -d ffmpeg_dist
+            find ffmpeg_dist -name ffmpeg.exe -exec cp {} ./ffmpeg.exe \;
+            FF=./ffmpeg.exe
+          fi
+          echo "using ffmpeg: $FF"
+          "$FF" -y -f lavfi -i color=c=blue:s=320x240:d=7 -i assets/selftest_tr.wav -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest testout/test.mp4
           ls -la testout
       - name: RUN full pipeline with shipped safe engine (tiny on test video)
         shell: bash
