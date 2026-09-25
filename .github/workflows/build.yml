@@ -66,16 +66,19 @@ jobs:
         if: matrix.variant == 'gpu'
         shell: pwsh
         run: |
-          $sdkExe = "$env:RUNNER_TEMP\vk_sdk.exe"
-          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe" -OutFile $sdkExe
-          Write-Host "SDK downloaded, installing silently..."
-          $p = Start-Process -FilePath $sdkExe -ArgumentList "/S" -Wait -PassThru
-          Write-Host "installer exit code: $($p.ExitCode)"
-          $sdk = (Get-ChildItem "C:\VulkanSDK" | Sort-Object Name -Descending | Select-Object -First 1).FullName
-          if (-not $sdk) { Write-Error "Vulkan SDK not found after install"; exit 1 }
+          $ErrorActionPreference = "Stop"
+          # Use the ZIP distribution (no installer): fast, deterministic,
+          # avoids the NSIS installer hanging on headless runners.
+          $zip = "$env:RUNNER_TEMP\vk_sdk.zip"
+          curl.exe -sL --retry 3 --connect-timeout 30 -o $zip "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.zip"
+          if (!(Test-Path $zip) -or ((Get-Item $zip).Length -lt 100MB)) { Write-Error "Vulkan SDK zip download failed"; exit 1 }
+          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\vk_sdk" -Force
+          $sdk = (Get-ChildItem "$env:RUNNER_TEMP\vk_sdk\VulkanSDK" | Select-Object -First 1).FullName
+          if (-not $sdk) { Write-Error "Vulkan SDK folder not found after unzip"; exit 1 }
           "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "VULKAN_SDK=$sdk"
           & "$sdk\Bin\glslc.exe" --version
+          Get-ChildItem "$sdk\Bin" -Name | Select-Object -First 12
       - name: Build engine (${{ matrix.variant }})
         run: cargo build --release -p tarjama-engine ${{ matrix.cargo_extra }}
       - name: Vulkan-specific verification (gpu)
