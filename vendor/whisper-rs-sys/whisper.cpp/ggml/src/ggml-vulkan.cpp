@@ -2067,6 +2067,14 @@ void ggml_vk_instance_init() {
 
     vk_instance_initialized = true;
 
+    // Tarjama patch (mirrors upstream graceful-failure fix): on systems where
+    // the Vulkan loader exists but no usable driver/ICD is available,
+    // vulkan.hpp THROWS from createInstance/enumeratePhysicalDevices. An
+    // uncaught exception would cross the FFI boundary and abort the host
+    // process. Catch everything and degrade to zero Vulkan devices so the
+    // caller falls back to the CPU backend.
+    try {
+
     vk::ApplicationInfo app_info{ "ggml-vulkan", 1, nullptr, 0, VK_API_VERSION };
 
     const std::vector<vk::ExtensionProperties> instance_extensions = vk::enumerateInstanceExtensionProperties();
@@ -2134,8 +2142,8 @@ void ggml_vk_instance_init() {
 
         // Make sure at least one device exists
         if (devices.empty()) {
-            std::cerr << "ggml_vulkan: Error: No devices found." << std::endl;
-            GGML_ABORT("fatal error");
+            std::cerr << "ggml_vulkan: No Vulkan devices found - continuing without GPU acceleration" << std::endl;
+            return;
         }
 
         // Default to using all dedicated GPUs
@@ -2227,6 +2235,15 @@ void ggml_vk_instance_init() {
 
     for (size_t i = 0; i < vk_instance.device_indices.size(); i++) {
         ggml_vk_print_gpu_info(i);
+    }
+    } catch (const vk::SystemError& e) {
+        std::cerr << "ggml_vulkan: Failed to initialize Vulkan: " << e.what() << std::endl;
+        std::cerr << "ggml_vulkan: Continuing without GPU acceleration (CPU only)" << std::endl;
+        vk_instance.device_indices.clear();
+    } catch (const std::exception& e) {
+        std::cerr << "ggml_vulkan: Failed to initialize Vulkan: " << e.what() << std::endl;
+        std::cerr << "ggml_vulkan: Continuing without GPU acceleration (CPU only)" << std::endl;
+        vk_instance.device_indices.clear();
     }
 }
 
@@ -6172,6 +6189,13 @@ static int ggml_vk_get_device_count() {
 static void ggml_vk_get_device_description(int device, char * description, size_t description_size) {
     ggml_vk_instance_init();
 
+    // Tarjama patch: guard against describing a device that does not exist
+    // (happens when Vulkan initialization failed gracefully).
+    if (device < 0 || (size_t)device >= vk_instance.device_indices.size()) {
+        snprintf(description, description_size, "%s", "Vulkan unavailable");
+        return;
+    }
+
     std::vector<vk::PhysicalDevice> devices = vk_instance.instance.enumeratePhysicalDevices();
 
     vk::PhysicalDeviceProperties props;
@@ -6609,6 +6633,13 @@ static ggml_guid_t ggml_backend_vk_guid() {
 
 ggml_backend_t ggml_backend_vk_init(size_t dev_num) {
     VK_LOG_DEBUG("ggml_backend_vk_init(" << dev_num << ")");
+
+    ggml_vk_instance_init();
+    // Tarjama patch: no usable Vulkan device -> report no backend instead of
+    // tripping GGML_ASSERT, so whisper.cpp falls back to the CPU backend.
+    if (dev_num >= vk_instance.device_indices.size()) {
+        return nullptr;
+    }
 
     ggml_backend_vk_context * ctx = new ggml_backend_vk_context;
     ggml_vk_init(ctx, dev_num);
