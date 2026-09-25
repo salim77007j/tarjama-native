@@ -99,38 +99,66 @@ pub fn backend_report() -> String {
 }
 
 /// Enumerate Vulkan physical devices with a dynamically loaded loader.
-/// Returns (device_count, "name1 | name2"). Never panics.
+/// Returns (device_count, "name1 | name2"). Never panics. Result is cached.
 #[cfg(feature = "vulkan")]
 pub fn vulkan_probe() -> (u32, String) {
-    use ash::vk;
+    static CACHE: std::sync::OnceLock<(u32, String)> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            use ash::vk;
 
-    let entry = match unsafe { ash::Entry::load() } {
-        Ok(e) => e,
-        Err(_) => return (0, String::new()), // no loader (vulkan-1.dll missing)
-    };
-    let app = vk::ApplicationInfo::default().api_version(vk::make_api_version(0, 1, 1, 0));
-    let ci = vk::InstanceCreateInfo::default().application_info(&app);
-    let instance = match unsafe { entry.create_instance(&ci, None) } {
-        Ok(i) => i,
-        Err(_) => return (0, String::new()),
-    };
-    let devices = unsafe { instance.enumerate_physical_devices() }.unwrap_or_default();
-    let mut names = Vec::new();
-    for d in &devices {
-        let props = unsafe { instance.get_physical_device_properties(*d) };
-        let name = unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }
-            .to_string_lossy()
-            .to_string();
-        names.push(name);
-    }
-    let n = devices.len() as u32;
-    unsafe { instance.destroy_instance(None) };
-    (n, names.join(" | "))
+            let entry = match unsafe { ash::Entry::load() } {
+                Ok(e) => e,
+                Err(_) => return (0, String::new()), // no loader (vulkan-1.dll missing)
+            };
+            let app = vk::ApplicationInfo::default().api_version(vk::make_api_version(0, 1, 1, 0));
+            let ci = vk::InstanceCreateInfo::default().application_info(&app);
+            let instance = match unsafe { entry.create_instance(&ci, None) } {
+                Ok(i) => i,
+                Err(_) => return (0, String::new()), // no usable driver
+            };
+            let devices = unsafe { instance.enumerate_physical_devices() }.unwrap_or_default();
+            let mut names = Vec::new();
+            for d in &devices {
+                let props = unsafe { instance.get_physical_device_properties(*d) };
+                let name = unsafe { std::ffi::CStr::from_ptr(props.device_name.as_ptr()) }
+                    .to_string_lossy()
+                    .to_string();
+                names.push(name);
+            }
+            let n = devices.len() as u32;
+            unsafe { instance.destroy_instance(None) };
+            (n, names.join(" | "))
+        })
+        .clone()
 }
 
 #[cfg(not(feature = "vulkan"))]
 pub fn vulkan_probe() -> (u32, String) {
     (0, String::new())
+}
+
+/// Whether whisper should attempt GPU init this run.
+///
+/// IMPORTANT: whisper.cpp 1.7.1's ggml-vulkan instance init does not handle
+/// a failing vkCreateInstance gracefully (vulkan.hpp throws a C++ exception
+/// that aborts the process when no driver is usable). We therefore only ask
+/// whisper to use the GPU after OUR OWN probe proved the loader loads, an
+/// instance can be created and at least one physical device exists. No
+/// devices -> plain CPU, no crash.
+pub fn should_use_gpu() -> bool {
+    #[cfg(feature = "vulkan")]
+    {
+        if std::env::var("TARJAMA_NO_GPU").map(|v| v == "1").unwrap_or(false) {
+            return false;
+        }
+        let (n, _) = vulkan_probe();
+        n >= 1
+    }
+    #[cfg(not(feature = "vulkan"))]
+    {
+        false
+    }
 }
 
 /// Parts used by caps_line(): (vulkan_compiled, device_count, device_names).
