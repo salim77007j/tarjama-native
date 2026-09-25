@@ -62,32 +62,53 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: engine-${{ matrix.variant }}
-      - name: Install Vulkan SDK
+      - name: Assemble Vulkan SDK (installer-free)
         if: matrix.variant == 'gpu'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # Use the ZIP distribution (no installer): fast, deterministic,
-          # avoids the NSIS installer hanging on headless runners.
-          $zip = "$env:RUNNER_TEMP\vk_sdk.zip"
-          curl.exe -sL --retry 3 --connect-timeout 30 -o $zip "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.zip"
-          if (!(Test-Path $zip) -or ((Get-Item $zip).Length -lt 100MB)) { Write-Error "Vulkan SDK zip download failed"; exit 1 }
-          Expand-Archive -Path $zip -DestinationPath "$env:RUNNER_TEMP\vk_sdk" -Force
-          $sdk = (Get-ChildItem "$env:RUNNER_TEMP\vk_sdk\VulkanSDK" | Select-Object -First 1).FullName
-          if (-not $sdk) { Write-Error "Vulkan SDK folder not found after unzip"; exit 1 }
+          $sdk = "$env:RUNNER_TEMP\vksdk"
+          New-Item -ItemType Directory -Force -Path "$sdk\Include","$sdk\Lib","$sdk\Bin" | Out-Null
+          # 1) Vulkan headers (Khronos, small tarball)
+          curl.exe -sL --retry 3 -o "$env:RUNNER_TEMP\vkhdr.tgz" "https://github.com/KhronosGroup/Vulkan-Headers/archive/refs/tags/v1.4.304.tar.gz"
+          tar -xzf "$env:RUNNER_TEMP\vkhdr.tgz" -C "$env:RUNNER_TEMP"
+          Copy-Item "$env:RUNNER_TEMP\Vulkan-Headers-1.4.304\include\*" "$sdk\Include" -Recurse -Force
+          # 2) glslc.exe - EXTRACT (never execute) the LunarG SDK installer via 7-Zip
+          curl.exe -sL --retry 3 -o "$env:RUNNER_TEMP\vk_inst.exe" "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe"
+          $7z = "C:\Program Files\7-Zip\7z.exe"
+          if (!(Test-Path $7z)) { choco install 7zip -y --no-progress }
+          if (!(Test-Path $7z)) { $7z = "C:\ProgramData\chocolatey\lib\7zip\tools\7z.exe" }
+          & $7z x -y "-o$env:RUNNER_TEMP\vkx" "$env:RUNNER_TEMP\vk_inst.exe" | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\vkx\Bin\glslc.exe" "$sdk\Bin\glslc.exe"
+          # 3) Vulkan loader DLL (TEST ONLY, not shipped): MSYS2 build of the Khronos loader
+          curl.exe -sL --retry 3 -o "$env:RUNNER_TEMP\vkloader.zst" "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-vulkan-loader-1~1.4.357.0-1-any.pkg.tar.zst"
+          if (!(Test-Path "$env:RUNNER_TEMP\vkloader.zst")) { curl.exe -sL --retry 3 -o "$env:RUNNER_TEMP\vkloader.zst" "https://archive.msys2.org/mingw/mingw64/mingw-w64-x86_64-vulkan-loader-1~1.4.357.0-1-any.pkg.tar.zst" }
+          & $7z x -y "-o$env:RUNNER_TEMP\vkloader" "$env:RUNNER_TEMP\vkloader.zst" | Out-Null
+          & $7z x -y "-o$env:RUNNER_TEMP\vkloader2" "$env:RUNNER_TEMP\vkloader\vkloader.pkg.tar" | Out-Null
+          Copy-Item "$env:RUNNER_TEMP\vkloader2\mingw64\bin\vulkan-1.dll" "$env:RUNNER_TEMP\vulkan-1.dll"
+          # 4) import library source (def) - converted to .lib in the next step
+          curl.exe -sL --retry 3 -o "$env:RUNNER_TEMP\vulkan-1.def" "https://raw.githubusercontent.com/KhronosGroup/Vulkan-Loader/v1.4.304/loader/vulkan-1.def"
           "VULKAN_SDK=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "VULKAN_SDK=$sdk"
           & "$sdk\Bin\glslc.exe" --version
-          Get-ChildItem "$sdk\Bin" -Name | Select-Object -First 12
+          Get-ChildItem $sdk -Recurse -File | Select-Object FullName,Length
+      - name: Set up MSVC dev environment (gpu)
+        if: matrix.variant == 'gpu'
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Generate vulkan-1.lib from def (gpu)
+        if: matrix.variant == 'gpu'
+        shell: cmd
+        run: lib /nologo /def:"%RUNNER_TEMP%\vulkan-1.def" /machine:x64 /out:"%VULKAN_SDK%\Lib\vulkan-1.lib"
       - name: Build engine (${{ matrix.variant }})
         run: cargo build --release -p tarjama-engine ${{ matrix.cargo_extra }}
       - name: Vulkan-specific verification (gpu)
         if: matrix.variant == 'gpu'
         shell: bash
         run: |
-          # The exe imports vulkan-1.dll; on this GPU-less runner the loader
-          # must sit next to the exe for it to start (same layout we ship).
-          cp "$VULKAN_SDK/Bin/vulkan-1.dll" target/release/
+          # The exe imports vulkan-1.dll; on this GPU-less runner the test-only
+          # MSYS2 loader must sit next to the exe for it to start. Real user
+          # machines get the loader from their GPU driver.
+          cp "$RUNNER_TEMP/vulkan-1.dll" target/release/
           ./target/release/tarjama-engine.exe --capabilities
           n=$(grep -ci "vulkan-1.dll" target/release/tarjama-engine.exe || true)
           echo "vulkan-1.dll import references: $n"
@@ -122,12 +143,6 @@ jobs:
         with:
           name: engine-${{ matrix.variant }}
           path: target/release/tarjama-engine.exe
-      - name: Upload Vulkan loader DLL (gpu)
-        if: matrix.variant == 'gpu'
-        uses: actions/upload-artifact@v4
-        with:
-          name: vulkan-loader
-          path: target/release/vulkan-1.dll
 
   # ------------------------------------------------------------------
   # 2) Windows GUI build
@@ -289,7 +304,7 @@ jobs:
       - name: Download built exes
         uses: actions/download-artifact@v4
         with:
-          pattern: "{engine-safe,engine-fast,engine-gpu,gui-windows,vulkan-loader}"
+          pattern: "{engine-safe,engine-fast,engine-gpu,gui-windows}"
           path: artifacts
       - name: Assemble portable folder
         shell: pwsh
@@ -299,7 +314,6 @@ jobs:
           Copy-Item artifacts/engine-safe/tarjama-engine.exe dist/tarjama/tarjama-engine-safe.exe
           Copy-Item artifacts/engine-fast/tarjama-engine.exe dist/tarjama/tarjama-engine-fast.exe
           Copy-Item artifacts/engine-gpu/tarjama-engine.exe dist/tarjama/tarjama-engine-gpu.exe
-          Copy-Item artifacts/vulkan-loader/vulkan-1.dll dist/tarjama/
           Copy-Item ffmpeg.exe dist/tarjama/
           Copy-Item README.txt dist/tarjama/
           Copy-Item models/ggml-tiny-q5_1.bin  dist/tarjama/models/
@@ -322,13 +336,18 @@ jobs:
       - name: Assert GPU engine caps + startability
         shell: bash
         run: |
-          # The bundled vulkan-1.dll sits in dist/tarjama, so the GPU engine
-          # must start even on this GPU-less runner (0 devices expected).
+          # TEST-ONLY loader: the GPU-less runner has no vulkan-1.dll, so drop
+          # the MSYS2 Khronos loader next to the exe for this test. It is NOT
+          # shipped in the zip - real machines get the loader from GPU drivers.
+          curl -sL --retry 3 -o vulkan-1.dll.zst "https://repo.msys2.org/mingw/mingw64/mingw-w64-x86_64-vulkan-loader-1~1.4.357.0-1-any.pkg.tar.zst"
+          7z x -y -o vkloader_pkg vulkan-1.dll.zst > /dev/null
+          7z x -y -o vkloader_x vkloader_pkg/vkloader.pkg.tar > /dev/null
+          cp vkloader_x/mingw64/bin/vulkan-1.dll dist/tarjama/vulkan-1.dll
           caps=$(cd dist/tarjama && ./tarjama-engine-gpu.exe --capabilities)
           echo "$caps"
           echo "$caps" | grep -q "avx2=0"   || { echo "::error::gpu engine has AVX2 CPU ops"; exit 1; }
           echo "$caps" | grep -q "vulkan=1" || { echo "::error::gpu engine lacks Vulkan backend"; exit 1; }
-          echo "OK: GPU engine starts with bundled loader (CPU fallback on this runner)"
+          echo "OK: GPU engine starts with test loader (CPU fallback on this runner)"
       - name: Make short test video
         shell: bash
         run: |
@@ -368,6 +387,11 @@ jobs:
           echo "--- ep1gpu.ar.srt ---"; cat testout/ep1gpu.ar.srt
           perl -CSD -ne 'BEGIN{$ok=0} $ok=1 if /[\x{0600}-\x{06FF}]/; END{exit($ok?0:1)}' testout/ep1gpu.ar.srt || { echo "::error::no Arabic (gpu engine)"; exit 1; }
           echo "GPU ENGINE E2E OK (no GPU on runner -> exercised the automatic CPU fallback path)"
+      - name: Remove test-only Vulkan loader before packaging
+        shell: bash
+        run: |
+          rm -f dist/tarjama/vulkan-1.dll
+          echo "test-only loader removed (users get it from their GPU driver)"
       - name: GUI smoke test on Windows (best effort)
         id: guitest
         continue-on-error: true
@@ -403,7 +427,7 @@ jobs:
           $z = [System.IO.Compression.ZipFile]::OpenRead("$PWD/TarjamaNative-Windows-x64.zip")
           $names = $z.Entries.FullName
           $z.Dispose()
-          @("tarjama/tarjama.exe","tarjama/tarjama-engine-safe.exe","tarjama/tarjama-engine-fast.exe","tarjama/tarjama-engine-gpu.exe","tarjama/vulkan-1.dll","tarjama/ffmpeg.exe",
+          @("tarjama/tarjama.exe","tarjama/tarjama-engine-safe.exe","tarjama/tarjama-engine-fast.exe","tarjama/tarjama-engine-gpu.exe","tarjama/ffmpeg.exe",
             "tarjama/models/ggml-tiny-q5_1.bin","tarjama/models/ggml-base-q5_1.bin","tarjama/models/ggml-small-q5_1.bin",
             "tarjama/models/opus-mt/encoder_model.int8.onnx") | ForEach-Object {
             if ($names -notcontains $_) { Write-Error "missing in zip: $_"; exit 1 } else { Write-Host "ok $_" }
@@ -447,7 +471,7 @@ jobs:
               as before. Set TARJAMA_NO_GPU=1 to force CPU for debugging.
 
             Bundled compressed models (Tiny 32 MB, Base 60 MB, Small 190 MB q5_1 + OPUS-MT tr->ar int8).
-            ffmpeg.exe + Vulkan loader included. No internet, no downloads.
+            ffmpeg.exe included. No internet, no downloads.
           files: TarjamaNative-Windows-x64.zip
           draft: false
           prerelease: false
